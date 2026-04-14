@@ -1,0 +1,6 @@
+{
+  "name": "CDG Browser",
+  "description": "Navegador web de alta seguridad con bloqueo avanzado de anuncios, rastreadores, analíticas y popups. Navegación privada y limpia.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
