@@ -29,43 +29,31 @@ export default function App() {
   const [history, setHistory] = useState<string[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [isHome, setIsHome] = useState(true);
-  const [proxyUrl, setProxyUrl] = useState('');
-  const [blockedCount, setBlockedCount] = useState(0);
-  const [totalBlocked, setTotalBlocked] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
-  const [showPrivacyPanel, setShowPrivacyPanel] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
     handleNavigate('https://www.google.com');
   }, []);
 
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data.type === 'STATS') {
-        setBlockedCount(event.data.blocked);
-        setTotalBlocked(prev => prev + event.data.blocked);
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, []);
-
   const handleNavigate = (targetUrl?: string) => {
     let target = (targetUrl || inputUrl).trim();
     if (!target) return;
     
+    // Check if it looks like a URL
+    const isUrl = /^(https?:\/\/)?([\da-z.-]+)\.([a-z.]{2,6})([\/\w .-]*)*\/?$/.test(target);
+    
     if (!target.startsWith('http')) {
-      if (target.includes('.') && !target.includes(' ')) {
+      if (isUrl) {
         target = 'https://' + target;
       } else {
-        target = `https://www.google.com/search?q=${encodeURIComponent(target)}`;
+        target = `https://duckduckgo.com/?q=${encodeURIComponent(target)}`;
       }
     }
     
+    console.log('Navigating to:', target);
     setUrl(target);
     setInputUrl(target);
-    setProxyUrl(`/api/proxy?url=${encodeURIComponent(target)}`);
     setIsLoading(true);
     setIsHome(false);
     setHistory(prev => {
@@ -78,13 +66,11 @@ export default function App() {
     setIsHome(true);
     setUrl('Home');
     setInputUrl('');
-    setProxyUrl('');
-    setBlockedCount(0);
   };
 
   const handleRefresh = () => {
-    if (iframeRef.current && proxyUrl) {
-      iframeRef.current.src = proxyUrl;
+    if (iframeRef.current) {
+      iframeRef.current.src = url;
       setIsLoading(true);
     }
   };
@@ -126,15 +112,6 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-4">
-            <button 
-              onClick={() => setShowPrivacyPanel(!showPrivacyPanel)}
-              className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono transition-colors ${
-                blockedCount > 0 ? 'bg-green-100 text-green-800 border border-green-200' : 'bg-gray-100 text-gray-600 border border-gray-200'
-              }`}
-            >
-              <ShieldCheck size={14} />
-              <span>SHIELD ACTIVE: {blockedCount}</span>
-            </button>
             <Menu size={18} className="cursor-pointer opacity-60 hover:opacity-100" />
           </div>
         </div>
@@ -167,10 +144,20 @@ export default function App() {
             />
             <button 
               onClick={() => handleNavigate()}
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-gray-200 rounded transition-colors"
+              className="absolute right-10 top-1/2 -translate-y-1/2 p-1 hover:bg-gray-200 rounded transition-colors"
+              title="Navigate"
             >
               <Search size={16} />
             </button>
+            <a 
+              href={url} 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-gray-200 rounded transition-colors text-gray-400 hover:text-[#141414]"
+              title="Open Direct (No Proxy)"
+            >
+              <ExternalLink size={16} />
+            </a>
           </div>
 
           <div className="flex items-center gap-2">
@@ -234,49 +221,42 @@ export default function App() {
                   ))}
                 </div>
 
-                <div className="pt-12 grid grid-cols-3 gap-8 text-left">
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider">
-                      <Shield size={14} />
-                      Ad Block
+                  <div className="pt-12 grid grid-cols-2 gap-8 text-left">
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider">
+                        <Shield size={14} />
+                        Security
+                      </div>
+                      <p className="text-[11px] opacity-60 leading-relaxed">Modern web standards for a safe browsing experience.</p>
                     </div>
-                    <p className="text-[11px] opacity-60 leading-relaxed">Advanced filtering removes intrusive ads and banners before they load.</p>
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider">
-                      <Lock size={14} />
-                      Privacy
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider">
+                        <Lock size={14} />
+                        Privacy
+                      </div>
+                      <p className="text-[11px] opacity-60 leading-relaxed">Direct connection to your favorite websites.</p>
                     </div>
-                    <p className="text-[11px] opacity-60 leading-relaxed">Tracker and analytics blocking prevents companies from following you.</p>
                   </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider">
-                      <RotateCcw size={14} />
-                      Proxy
-                    </div>
-                    <p className="text-[11px] opacity-60 leading-relaxed">All traffic is routed through our secure proxy to hide your identity.</p>
-                  </div>
-                </div>
               </motion.div>
             </div>
           ) : (
-            <>
+            <div className="relative flex-1 bg-white overflow-hidden">
               {isLoading && (
-                <div className="absolute inset-0 z-10 bg-white/80 backdrop-blur-sm flex items-center justify-center">
+                <div className="absolute inset-0 z-20 bg-white/80 backdrop-blur-sm flex items-center justify-center">
                   <div className="flex flex-col items-center gap-4">
                     <div className="w-12 h-12 border-4 border-[#141414] border-t-transparent rounded-full animate-spin" />
-                    <p className="font-mono text-xs uppercase tracking-widest animate-pulse">Filtering Content...</p>
+                    <p className="font-mono text-xs uppercase tracking-widest animate-pulse">Loading Content...</p>
                   </div>
                 </div>
               )}
               <iframe 
                 ref={iframeRef}
-                src={proxyUrl}
+                src={url}
                 className="w-full h-full border-none"
                 onLoad={handleIframeLoad}
                 title="Browser Content"
               />
-            </>
+            </div>
           )}
         </div>
 
@@ -317,84 +297,6 @@ export default function App() {
             </motion.aside>
           )}
         </AnimatePresence>
-
-        {/* Privacy Panel (Sidebar) */}
-        <AnimatePresence>
-          {showPrivacyPanel && (
-            <motion.aside 
-              initial={{ x: '100%' }}
-              animate={{ x: 0 }}
-              exit={{ x: '100%' }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="absolute right-0 top-0 bottom-0 w-80 bg-white border-l border-[#141414] z-30 shadow-2xl p-6 overflow-y-auto"
-            >
-              <div className="flex items-center justify-between mb-8">
-                <h2 className="font-serif italic text-xl">CDG Shield</h2>
-                <button onClick={() => setShowPrivacyPanel(false)} className="p-1 hover:bg-gray-100 rounded">
-                  <X size={20} />
-                </button>
-              </div>
-
-              <div className="space-y-6">
-                <div className="p-4 bg-green-50 border border-green-200 rounded-xl">
-                  <div className="flex items-center gap-3 mb-2 text-green-800">
-                    <ShieldCheck size={20} />
-                    <span className="font-bold">Protection Active</span>
-                  </div>
-                  <p className="text-xs text-green-700 leading-relaxed">
-                    CDG Browser is currently filtering this page for malicious scripts, trackers, and intrusive advertisements.
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="p-4 bg-[#E4E3E0] rounded-xl">
-                    <p className="text-[10px] uppercase tracking-wider opacity-50 mb-1">Blocked on Page</p>
-                    <p className="text-2xl font-mono font-bold">{blockedCount}</p>
-                  </div>
-                  <div className="p-4 bg-[#E4E3E0] rounded-xl">
-                    <p className="text-[10px] uppercase tracking-wider opacity-50 mb-1">Total Blocked</p>
-                    <p className="text-2xl font-mono font-bold">{totalBlocked}</p>
-                  </div>
-                </div>
-
-                <div className="space-y-4">
-                  <h3 className="text-xs font-bold uppercase tracking-widest border-b border-[#141414]/10 pb-2">Active Filters</h3>
-                  <ul className="space-y-3">
-                    {[
-                      { label: 'Ad Blocking', status: 'Active', icon: <Shield size={14} /> },
-                      { label: 'Tracker Blocking', status: 'Active', icon: <Shield size={14} /> },
-                      { label: 'Popup Blocker', status: 'Active', icon: <Shield size={14} /> },
-                      { label: 'Analytics Blocking', status: 'Active', icon: <Shield size={14} /> },
-                      { label: 'Banner Removal', status: 'Active', icon: <Shield size={14} /> },
-                    ].map((item, i) => (
-                      <li key={i} className="flex items-center justify-between text-sm">
-                        <div className="flex items-center gap-2 opacity-70">
-                          {item.icon}
-                          <span>{item.label}</span>
-                        </div>
-                        <span className="text-[10px] font-mono bg-green-100 text-green-800 px-1.5 py-0.5 rounded uppercase font-bold">
-                          {item.status}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="pt-8">
-                  <div className="p-4 border border-[#141414]/10 rounded-xl bg-gray-50">
-                    <div className="flex items-center gap-2 mb-2">
-                      <Info size={14} className="text-blue-500" />
-                      <span className="text-xs font-bold">About CDG Browser</span>
-                    </div>
-                    <p className="text-[11px] leading-relaxed opacity-70">
-                      CDG Browser uses a server-side proxy to sanitize web content before it reaches your device. This ensures that tracking pixels and malicious scripts are neutralized at the source.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </motion.aside>
-          )}
-        </AnimatePresence>
       </main>
 
       {/* Footer / Status Bar */}
@@ -402,7 +304,7 @@ export default function App() {
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-1">
             <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
-            <span>Proxy Connected</span>
+            <span>Browser Active</span>
           </div>
           <span>TLS 1.3 Active</span>
         </div>
