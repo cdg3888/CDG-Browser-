@@ -89,7 +89,7 @@ final class AdBlockEngine {
         this.listener = listener;
         preferences = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
         enabled = preferences.getBoolean(ENABLED_KEY, true);
-        mediaDetectionEnabled = preferences.getBoolean(MEDIA_DETECTION_KEY, true);
+        mediaDetectionEnabled = preferences.getBoolean(MEDIA_DETECTION_KEY, false);
         Set<String> savedSites = preferences.getStringSet(ALLOWED_SITES_KEY, new HashSet<>());
         for (String site : savedSites) {
             String normalized = normalizeDomain(site);
