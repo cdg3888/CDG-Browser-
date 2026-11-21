@@ -7,6 +7,23 @@ android {
     compileSdk = 37
     compileSdkMinor = 2
 
+    buildFeatures {
+        buildConfig = true
+    }
+
+    flavorDimensions += "device"
+    productFlavors {
+        create("mobile") {
+            dimension = "device"
+            buildConfigField("boolean", "IS_TV", "false")
+        }
+        create("tv") {
+            dimension = "device"
+            applicationIdSuffix = ".tv"
+            buildConfigField("boolean", "IS_TV", "true")
+        }
+    }
+
     splits {
         abi {
             isEnable = true

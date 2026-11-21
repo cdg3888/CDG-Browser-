@@ -279,6 +279,9 @@ public final class MainActivity extends Activity {
         if (adBlockEngine == null) {
             adBlockEngine = new AdBlockEngine(this, runtime, null);
         }
+        if (isTvVersion()) {
+            navigationPanelButton.post(navigationPanelButton::requestFocus);
+        }
         adBlockEngine.setListener(new AdBlockEngine.Listener() {
             @Override
             public void onReady() {
@@ -371,35 +374,39 @@ public final class MainActivity extends Activity {
 
         LinearLayout titleRow = new LinearLayout(this);
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
-        titleRow.setPadding(dp(6), dp(6), dp(8), dp(6));
+        titleRow.setPadding(dp(isTvVersion() ? 18 : 6), dp(8),
+                dp(isTvVersion() ? 18 : 8), dp(8));
         titleRow.setBackgroundColor(colorSurface);
-        navigationPanelButton = button("☰", () -> toggleSidePanel(1));
+        navigationPanelButton = button(
+                isTvVersion() ? "Pestañas" : "☰", () -> toggleSidePanel(1));
         navigationPanelButton.setContentDescription("Abrir pestañas y favoritos");
-        titleRow.addView(navigationPanelButton, new LinearLayout.LayoutParams(dp(42), dp(42)));
+        titleRow.addView(navigationPanelButton, headerButtonParams());
         TextView title = new TextView(this);
-        title.setText("CDG / BROWSER");
+        title.setText(isTvVersion() ? "CDG BROWSER  /  TV" : "CDG / BROWSER");
         title.setTextColor(colorText);
-        title.setTextSize(15);
+        title.setTextSize(isTvVersion() ? 19 : 15);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         title.setLetterSpacing(0.06f);
         titleRow.addView(title, new LinearLayout.LayoutParams(0, dp(44), 1));
         privateButton = button("Privada · no", () -> togglePrivateMode());
         titleRow.addView(privateButton);
-        settingsButton = button("⚙", () -> toggleSidePanel(2));
+        settingsButton = button(isTvVersion() ? "Menú" : "⚙", () -> toggleSidePanel(2));
         settingsButton.setContentDescription("Abrir descargas, AdBlock y ajustes");
-        titleRow.addView(settingsButton, new LinearLayout.LayoutParams(dp(42), dp(42)));
-        addressToggleButton = button("⌄", this::toggleAddressBar);
+        titleRow.addView(settingsButton, headerButtonParams());
+        addressToggleButton = button(
+                isTvVersion() ? "Ocultar barra" : "⌄", this::toggleAddressBar);
         addressToggleButton.setContentDescription("Mostrar u ocultar barra de direcciones");
-        titleRow.addView(addressToggleButton, new LinearLayout.LayoutParams(dp(40), dp(42)));
+        titleRow.addView(addressToggleButton, headerButtonParams());
         root.addView(titleRow);
 
         addressRow = new LinearLayout(this);
         addressRow.setGravity(Gravity.CENTER_VERTICAL);
-        addressRow.setPadding(dp(12), dp(8), dp(12), dp(8));
+        addressRow.setPadding(dp(isTvVersion() ? 18 : 12), dp(8),
+                dp(isTvVersion() ? 18 : 12), dp(8));
         addressRow.setBackgroundColor(colorSurface);
         addressField = new EditText(this);
         addressField.setSingleLine(true);
-        addressField.setTextSize(14);
+        addressField.setTextSize(isTvVersion() ? 18 : 14);
         addressField.setHint("Buscar o introducir dirección");
         addressField.setHintTextColor(colorMuted);
         addressField.setTextColor(colorText);
@@ -408,18 +415,28 @@ public final class MainActivity extends Activity {
         addressField.setSelectAllOnFocus(true);
         addressField.setPadding(dp(14), 0, dp(14), 0);
         addressField.setBackground(roundedBackground(colorBackground, colorBorder, 16));
+        if (isTvVersion()) {
+            addressField.setOnFocusChangeListener((view, focused) -> addressField.setBackground(
+                    roundedBackground(
+                            colorBackground, focused ? colorAccent : colorBorder, 16)));
+        }
         addressField.setText(currentUrl);
-        addressRow.addView(addressField, new LinearLayout.LayoutParams(0, dp(48), 1));
-        favoriteButton = button("☆", this::toggleFavorite);
+        addressRow.addView(addressField,
+                new LinearLayout.LayoutParams(0, dp(isTvVersion() ? 58 : 48), 1));
+        favoriteButton = button(isTvVersion() ? "Favorito" : "☆", this::toggleFavorite);
         LinearLayout.LayoutParams favoriteParams = new LinearLayout.LayoutParams(
-                dp(44), dp(44));
+                isTvVersion() ? -2 : dp(44), dp(isTvVersion() ? 54 : 44));
         favoriteParams.setMargins(dp(6), 0, dp(6), 0);
         addressRow.addView(favoriteButton, favoriteParams);
-        Button goButton = button("Ir", this::submitAddress);
+        Button goButton = button(isTvVersion() ? "Buscar" : "Ir", this::submitAddress);
         goButton.setTextColor(Color.WHITE);
         goButton.setBackground(rippleBackground(colorAccent, colorAccent, 14));
+        if (isTvVersion()) {
+            goButton.setOnFocusChangeListener((view, focused) -> goButton.setBackground(
+                    rippleBackground(colorAccent, focused ? Color.WHITE : colorAccent, 14)));
+        }
         LinearLayout.LayoutParams goParams = new LinearLayout.LayoutParams(
-                dp(48), dp(44));
+                dp(isTvVersion() ? 88 : 48), dp(isTvVersion() ? 54 : 44));
         addressRow.addView(goButton, goParams);
         reloadButton = button("↻", () -> {
             if (session != null) {
@@ -427,12 +444,16 @@ public final class MainActivity extends Activity {
             }
         });
         reloadButton.setContentDescription("Actualizar página");
-        LinearLayout.LayoutParams reloadParams = new LinearLayout.LayoutParams(dp(44), dp(44));
+        if (isTvVersion()) {
+            reloadButton.setText("Actualizar");
+        }
+        LinearLayout.LayoutParams reloadParams = new LinearLayout.LayoutParams(
+                isTvVersion() ? -2 : dp(44), dp(isTvVersion() ? 54 : 44));
         reloadParams.setMargins(dp(4), 0, 0, 0);
         addressRow.addView(reloadButton, reloadParams);
         root.addView(addressRow);
         addressRow.setVisibility(addressBarVisible ? View.VISIBLE : View.GONE);
-        addressToggleButton.setText(addressBarVisible ? "⌄" : "⌃");
+        addressToggleButton.setText(addressToggleLabel());
         addressField.setOnEditorActionListener((view, actionId, event) -> {
             boolean go = actionId == EditorInfo.IME_ACTION_GO
                     || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER);
@@ -506,9 +527,20 @@ public final class MainActivity extends Activity {
 
     private FrameLayout.LayoutParams sidebarLayoutParams(int gravity) {
         int screenWidth = getResources().getDisplayMetrics().widthPixels;
-        int width = Math.max(dp(240), Math.min(dp(340), screenWidth - dp(48)));
+        int width = isTvVersion()
+                ? Math.max(dp(360), Math.min(dp(520), screenWidth - dp(96)))
+                : Math.max(dp(240), Math.min(dp(340), screenWidth - dp(48)));
         return new FrameLayout.LayoutParams(
                 width, FrameLayout.LayoutParams.MATCH_PARENT, gravity);
+    }
+
+    private LinearLayout.LayoutParams headerButtonParams() {
+        return new LinearLayout.LayoutParams(
+                isTvVersion() ? -2 : dp(42), dp(isTvVersion() ? 54 : 42));
+    }
+
+    private boolean isTvVersion() {
+        return BuildConfig.IS_TV;
     }
 
     private void toggleSidePanel(int side) {
@@ -527,6 +559,9 @@ public final class MainActivity extends Activity {
             int width = ((FrameLayout.LayoutParams) leftSidebar.getLayoutParams()).width;
             leftSidebar.setTranslationX(-width - dp(16));
             leftSidebar.animate().translationX(0).setDuration(180).start();
+            if (isTvVersion()) {
+                leftSidebar.post(() -> leftSidebar.getChildAt(2).requestFocus());
+            }
         } else {
             leftSidebar.setVisibility(View.GONE);
             rightSidebar.setVisibility(View.VISIBLE);
@@ -534,10 +569,21 @@ public final class MainActivity extends Activity {
             int width = ((FrameLayout.LayoutParams) rightSidebar.getLayoutParams()).width;
             rightSidebar.setTranslationX(width + dp(16));
             rightSidebar.animate().translationX(0).setDuration(180).start();
+            if (isTvVersion()) {
+                rightSidebar.post(() -> {
+                    if (rightSidebar.getChildAt(1) instanceof ScrollView) {
+                        ScrollView scroll = (ScrollView) rightSidebar.getChildAt(1);
+                        if (scroll.getChildAt(0) instanceof LinearLayout) {
+                            ((LinearLayout) scroll.getChildAt(0)).getChildAt(0).requestFocus();
+                        }
+                    }
+                });
+            }
         }
     }
 
     private void closeSidePanel() {
+        int closedSide = openSidebar;
         openSidebar = 0;
         sidebarScrim.setVisibility(View.GONE);
         if (leftSidebar != null) {
@@ -545,6 +591,12 @@ public final class MainActivity extends Activity {
         }
         if (rightSidebar != null) {
             rightSidebar.setVisibility(View.GONE);
+        }
+        if (isTvVersion()) {
+            Button focusTarget = closedSide == 1 ? navigationPanelButton : settingsButton;
+            if (focusTarget != null) {
+                focusTarget.requestFocus();
+            }
         }
     }
 
@@ -739,13 +791,23 @@ public final class MainActivity extends Activity {
     private Button button(String label, Runnable action) {
         Button button = new Button(this);
         button.setText(label);
-        button.setTextSize(12);
+        button.setTextSize(isTvVersion() ? 16 : 12);
         button.setTextColor(colorText);
         button.setAllCaps(false);
         button.setMinWidth(0);
-        button.setMinimumHeight(dp(42));
-        button.setPadding(dp(12), 0, dp(12), 0);
+        button.setMinimumHeight(dp(isTvVersion() ? 54 : 42));
+        button.setPadding(dp(isTvVersion() ? 18 : 12), 0,
+                dp(isTvVersion() ? 18 : 12), 0);
         button.setBackground(rippleBackground(colorSurface, colorBorder, 14));
+        button.setFocusable(true);
+        button.setFocusableInTouchMode(!isTvVersion());
+        if (isTvVersion()) {
+            button.setOnFocusChangeListener((view, focused) -> button.setBackground(
+                    rippleBackground(
+                            focused ? colorRipple : colorSurface,
+                            focused ? colorAccent : colorBorder,
+                            14)));
+        }
         button.setOnClickListener(view -> action.run());
         return button;
     }
@@ -1735,14 +1797,21 @@ public final class MainActivity extends Activity {
     private void setAddressBarVisible(boolean visible) {
         addressBarVisible = visible;
         addressRow.setVisibility(addressBarVisible ? View.VISIBLE : View.GONE);
-        addressToggleButton.setText(addressBarVisible ? "⌄" : "⌃");
+        addressToggleButton.setText(addressToggleLabel());
         if (addressBarVisible) {
             addressField.setText(currentUrl);
         }
     }
 
+    private String addressToggleLabel() {
+        if (isTvVersion()) {
+            return addressBarVisible ? "Ocultar barra" : "Mostrar barra";
+        }
+        return addressBarVisible ? "⌄" : "⌃";
+    }
+
     private void handlePageScroll(String pageUrl, boolean scrollingDown) {
-        if (!addressAutoHide || addressField == null || addressField.hasFocus()
+        if (isTvVersion() || !addressAutoHide || addressField == null || addressField.hasFocus()
                 || !isCurrentPage(pageUrl)) {
             return;
         }
@@ -2940,7 +3009,9 @@ public final class MainActivity extends Activity {
                 this::promptHomePage), settingButtonParams());
 
         Switch addressAutoHideSwitch = new Switch(this);
-        addressAutoHideSwitch.setText("Ocultar barra al desplazarse hacia abajo");
+        addressAutoHideSwitch.setText(isTvVersion()
+                ? "Autoocultar barra (no disponible en TV)"
+                : "Ocultar barra al desplazarse hacia abajo");
         addressAutoHideSwitch.setTextColor(colorText);
         addressAutoHideSwitch.setChecked(addressAutoHide);
         addressAutoHideSwitch.setOnCheckedChangeListener((view, checked) -> {
@@ -2952,6 +3023,7 @@ public final class MainActivity extends Activity {
                 setAddressBarVisible(true);
             }
         });
+        addressAutoHideSwitch.setEnabled(!isTvVersion());
         content.addView(addressAutoHideSwitch);
 
         TextView protectionHeading = settingsSection("Protección y privacidad");
@@ -3323,7 +3395,8 @@ public final class MainActivity extends Activity {
         homeUrl = isHttpUrl(savedHomePage) ? savedHomePage : HOME_URL;
         blockPopups = preferences.getBoolean(BLOCK_POPUPS_KEY, true);
         blockClickRedirects = preferences.getBoolean(BLOCK_CLICK_REDIRECTS_KEY, true);
-        addressAutoHide = preferences.getBoolean(ADDRESS_AUTO_HIDE_KEY, true);
+        addressAutoHide = !isTvVersion()
+                && preferences.getBoolean(ADDRESS_AUTO_HIDE_KEY, true);
         minimumMediaHeight = preferences.getInt(MINIMUM_MEDIA_HEIGHT_KEY, 1080);
         if (!isSupportedMediaHeight(minimumMediaHeight)) {
             minimumMediaHeight = 1080;
