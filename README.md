@@ -1,17 +1,6 @@
-# CDG Browser
+# CDG Browser para Android
 
-CDG Browser contiene una interfaz web React/Vite y una aplicación Android nativa basada en GeckoView.
-
-La interfaz React es una demostración visual: los sitios se muestran en un `iframe` y el navegador Android es la experiencia que integra las funciones nativas de navegación.
-
-## Ejecutar la interfaz web
-
-Requiere Node.js.
-
-```sh
-npm install
-npm run dev
-```
+CDG Browser es una aplicación Android nativa basada en GeckoView.
 
 ## Compilar la APK Android
 
@@ -23,6 +12,12 @@ cd android
 ```
 
 Se genera una APK de depuración por arquitectura en `android/app/build/outputs/apk/debug/` (por ejemplo, `app-arm64-v8a-debug.apk` para la mayoría de los teléfonos Android actuales).
+
+Instala en un dispositivo conectado la APK correspondiente a su arquitectura con:
+
+```sh
+adb install -r android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
+```
 
 La aplicación Android combina la protección estricta de GeckoView con una WebExtension local que filtra solicitudes de terceros usando una lista de hosts incluida en la app. En «Protección» se puede pausar ese filtro, crear una excepción para el sitio actual y actualizar la lista manualmente. La actualización usa [StevenBlack/hosts](https://github.com/StevenBlack/hosts) (licencia MIT), solo tras confirmación; GitHub ve la IP de red, pero no se envían el historial ni la dirección visitada. No hay actualización automática. Las reglas son por host: no eliminan anuncios propios del sitio ni aplican filtros cosméticos, así que no garantizan quitar toda publicidad.
 
