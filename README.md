@@ -13,6 +13,12 @@ cd android
 
 Se genera un APK universal por variante, con bibliotecas para `arm64-v8a`, `armeabi-v7a` y `x86_64`, en `android/app/build/outputs/apk/mobile/release/app-mobile-release.apk` y `android/app/build/outputs/apk/tv/release/app-tv-release.apk`. Los APK Release se firman con la clave debug local para que se puedan instalar y probar; esta clave no es apropiada para publicar la app. Para distribuirla, configura una clave de publicación propia y firma las APK con ella. La variante `mobile` conserva el identificador `com.cdg.browser`; `tv` usa `com.cdg.browser.tv`, incluye entrada Android TV/Leanback y una interfaz con controles grandes y foco para navegación con mando. Se pueden instalar ambas variantes a la vez. Para compilar solo una, usa `:app:assembleMobileRelease` o `:app:assembleTvRelease`.
 
+Para instalar la APK Release móvil en un dispositivo conectado:
+
+```sh
+adb install -r android/app/build/outputs/apk/mobile/release/app-mobile-release.apk
+```
+
 Para generar las variantes Debug universales, usa `:app:assembleMobileDebug` y `:app:assembleTvDebug`. Para instalarlas en un dispositivo conectado:
 
 ```sh
