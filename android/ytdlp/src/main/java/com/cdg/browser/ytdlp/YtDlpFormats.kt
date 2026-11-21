@@ -11,7 +11,9 @@ data class YtDlpFormatOption(
     val details: String,
     val videoUrl: String?,
     val audioUrl: String?,
-    val audioOnly: Boolean
+    val audioOnly: Boolean,
+    val height: Int = 0,
+    val bitrateKbps: Int = 0
 )
 
 data class YtDlpMediaInfo(
@@ -85,6 +87,7 @@ internal object YtDlpFormats {
                         ?: video.acodec?.takeUnless { it.equals("none", ignoreCase = true) }
                 ).joinToString(" + ").ifBlank { "códecs no indicados" }
                 val container = video.ext?.uppercase()?.takeIf { it.isNotBlank() } ?: "FORMATO"
+                val bitrate = video.tbr.takeIf { it > 0 }?.let { " · ${it} kb/s" }.orEmpty()
                 val audioDescription = if (audio == null) {
                     if (video.hasAudio) "audio y video" else "solo video"
                 } else {
@@ -92,11 +95,13 @@ internal object YtDlpFormats {
                 }
                 options += YtDlpFormatOption(
                     selector = selector,
-                    title = "$resolution · $container",
+                    title = "$resolution · $container$bitrate",
                     details = "$audioDescription · $codecs",
                     videoUrl = video.url,
                     audioUrl = audio?.url,
-                    audioOnly = false
+                    audioOnly = false,
+                    height = video.height,
+                    bitrateKbps = video.tbr
                 )
             }
 
@@ -109,7 +114,8 @@ internal object YtDlpFormats {
                 details = audio.acodec ?: "Códec de audio no indicado",
                 videoUrl = null,
                 audioUrl = audio.url,
-                audioOnly = true
+                audioOnly = true,
+                bitrateKbps = audio.abr
             )
         }
 

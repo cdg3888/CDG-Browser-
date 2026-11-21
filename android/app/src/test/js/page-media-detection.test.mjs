@@ -10,9 +10,21 @@ const pageSource = await readFile(new URL("page-media.js", extensionPath), "utf8
 function createPageSniffer() {
   const listeners = {};
   const messages = [];
+  const window = {
+    scrollY: 0,
+    addEventListener(name, callback) {
+      listeners[`window:${name}`] = callback;
+    }
+  };
+  window.top = window;
   const scope = {
     URL,
+    window,
     document: {
+      title: "Example video",
+      baseURI: "https://site.example/watch",
+      documentElement: { scrollTop: 0 },
+      querySelector: () => ({ content: "https://images.example/poster.jpg" }),
       addEventListener(name, callback) {
         listeners[name] = callback;
       }
@@ -28,7 +40,7 @@ function createPageSniffer() {
   scope.globalThis = scope;
   vm.runInNewContext(snifferSource, scope);
   vm.runInNewContext(pageSource, scope);
-  return { listeners, messages };
+  return { listeners, messages, window };
 }
 
 test("reports a playing HTML5 video source once and ignores paused videos", () => {
@@ -38,6 +50,7 @@ test("reports a playing HTML5 video source once and ignores paused videos", () =
     paused: true,
     readyState: 4,
     videoWidth: 1280,
+    poster: "/poster.jpg",
     currentSrc: "https://cdn.example/movie.mp4"
   };
 
@@ -51,6 +64,37 @@ test("reports a playing HTML5 video source once and ignores paused videos", () =
   assert.equal(messages.length, 1);
   assert.equal(messages[0].type, "page-media-detected");
   assert.equal(messages[0].url, "https://cdn.example/movie.mp4");
+  assert.equal(messages[0].pageTitle, "Example video");
+  assert.equal(messages[0].thumbnailUrl, "https://site.example/poster.jpg");
+  assert.equal(messages[0].videoWidth, 1280);
+});
+
+test("detects a paused video once its metadata has loaded", () => {
+  const { listeners, messages } = createPageSniffer();
+  listeners.loadedmetadata({
+    target: {
+      tagName: "VIDEO",
+      paused: true,
+      readyState: 1,
+      videoWidth: 0,
+      currentSrc: "https://cdn.example/movie.mp4"
+    }
+  });
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].url, "https://cdn.example/movie.mp4");
+});
+
+test("reports scroll direction for automatic address-bar hiding", () => {
+  const { listeners, messages, window } = createPageSniffer();
+  const onScroll = listeners["window:scroll"];
+  window.scrollY = 24;
+  onScroll();
+  window.scrollY = 0;
+  onScroll();
+
+  assert.deepEqual(messages.map((message) => message.type), ["page-scroll", "page-scroll"]);
+  assert.deepEqual(messages.map((message) => message.direction), ["down", "up"]);
 });
 
 test("ignores empty, non-video, and non-media sources", () => {

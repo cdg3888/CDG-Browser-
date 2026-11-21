@@ -261,6 +261,9 @@ class YtDlpEngine(context: Context) {
         audioOnly: Boolean,
         includeSubtitles: Boolean,
         referer: String?,
+        outputTitle: String?,
+        concurrentFragments: Int,
+        remuxToMp4: Boolean,
         callback: DownloadCallback
     ) {
         if (!initialized) {
@@ -279,10 +282,11 @@ class YtDlpEngine(context: Context) {
         }
 
         val processId = UUID.randomUUID().toString()
+        val filename = outputFilename(outputTitle)
         val request = YoutubeDLRequest(url)
             .addOption("--no-playlist")
             .addOption("-f", formatSelector)
-            .addOption("-o", File(outputDirectory, "%(title).80B.%(ext)s").absolutePath)
+            .addOption("-o", File(outputDirectory, "$filename.%(ext)s").absolutePath)
             .addOption("--socket-timeout", NETWORK_TIMEOUT_SECONDS)
         if (isHttpUrl(referer)) {
             request.addOption("--referer", referer!!)
@@ -292,6 +296,13 @@ class YtDlpEngine(context: Context) {
                 .addOption("--audio-format", "mp3")
                 .addOption("--audio-quality", "0")
         } else {
+            request.addOption(
+                "--concurrent-fragments",
+                concurrentFragments.coerceIn(1, MAX_CONCURRENT_FRAGMENTS).toString()
+            )
+            if (remuxToMp4) {
+                request.addOption("--remux-video", "mp4")
+            }
             if (includeSubtitles) {
                 request.addOption("--write-subs")
                     .addOption("--embed-subs")
@@ -367,6 +378,16 @@ class YtDlpEngine(context: Context) {
         }
     }
 
+    private fun outputFilename(title: String?): String {
+        val safeTitle = title.orEmpty()
+            .replace(Regex("""[\\/:*?"<>|\p{Cntrl}]"""), "_")
+            .replace("%", "%%")
+            .trim()
+            .trim('.')
+            .take(MAX_FILENAME_TITLE_LENGTH)
+        return safeTitle.ifBlank { "video-%(id)s" }
+    }
+
     fun cancel(processId: String): Boolean = YoutubeDL.destroyProcessById(processId)
 
     fun cancelInfo(processId: String): Boolean {
@@ -390,5 +411,7 @@ class YtDlpEngine(context: Context) {
     private companion object {
         const val NETWORK_TIMEOUT_SECONDS = 20
         const val INFO_TIMEOUT_MS = 45_000L
+        const val MAX_CONCURRENT_FRAGMENTS = 32
+        const val MAX_FILENAME_TITLE_LENGTH = 80
     }
 }

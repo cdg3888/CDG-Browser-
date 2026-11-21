@@ -150,6 +150,61 @@ test("accepts HTML5 media reports from normal tabs and ignores private tabs", ()
   assert.equal(detected[0].mediaType, "Video");
 });
 
+test("enriches an existing detection with page title and poster metadata", () => {
+  const { listeners, messages } = createBackground();
+  const url = "https://cdn.example/movie.mp4";
+  const pageUrl = "https://site.example/watch";
+  listeners.beforeRequest({
+    url,
+    documentUrl: pageUrl,
+    type: "media"
+  });
+  listeners.runtimeMessage({
+    type: "page-media-detected",
+    url,
+    pageTitle: "Example film",
+    thumbnailUrl: "https://images.example/poster.jpg",
+    videoWidth: 1920,
+    videoHeight: 1080,
+    durationSeconds: 120
+  }, {
+    url: pageUrl,
+    tab: { url: pageUrl, incognito: false }
+  });
+
+  const detected = messages.filter((message) => message.type === "media-detected");
+  assert.equal(detected.length, 2);
+  assert.equal(detected[1].pageTitle, "Example film");
+  assert.equal(detected[1].thumbnailUrl, "https://images.example/poster.jpg");
+  assert.equal(detected[1].videoHeight, 1080);
+});
+
+test("forwards top-page scroll events and honors the media detection setting", () => {
+  const { listeners, messages, sendPortMessage } = createBackground();
+  const pageUrl = "https://site.example/watch";
+  listeners.runtimeMessage({
+    type: "page-scroll",
+    direction: "down"
+  }, {
+    url: pageUrl,
+    tab: { url: pageUrl, incognito: false }
+  });
+  assert.equal(messages.at(-1).type, "page-scroll");
+  assert.equal(messages.at(-1).direction, "down");
+
+  sendPortMessage({
+    type: "configure",
+    enabled: false,
+    mediaDetectionEnabled: false
+  });
+  listeners.beforeRequest({
+    url: "https://cdn.example/movie.mp4",
+    documentUrl: pageUrl,
+    type: "media"
+  });
+  assert.equal(messages.filter((message) => message.type === "media-detected").length, 0);
+});
+
 test("ignores MP4 URLs requested as images unless the response is video", () => {
   const { listeners, messages } = createBackground();
   const details = {

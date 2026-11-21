@@ -25,7 +25,17 @@ final class AdBlockEngine {
 
         void onError(String message);
 
-        void onMediaDetected(String url, String pageUrl, String mediaType);
+        void onMediaDetected(
+                String url,
+                String pageUrl,
+                String mediaType,
+                String pageTitle,
+                String thumbnailUrl,
+                int videoWidth,
+                int videoHeight,
+                int durationSeconds);
+
+        void onPageScroll(String pageUrl, boolean scrollingDown);
     }
 
     private static final String EXTENSION_URI =
@@ -34,6 +44,7 @@ final class AdBlockEngine {
     private static final String NATIVE_APP = "com.cdg.browser";
     private static final String PREFERENCES = "cdg_browser";
     private static final String ENABLED_KEY = "ad_block_enabled";
+    private static final String MEDIA_DETECTION_KEY = "media_detection_enabled";
     private static final String ALLOWED_SITES_KEY = "ad_block_allowed_sites";
 
     private final GeckoRuntime runtime;
@@ -45,6 +56,7 @@ final class AdBlockEngine {
     private WebExtension extension;
     private WebExtension.Port nativePort;
     private boolean enabled;
+    private boolean mediaDetectionEnabled;
     private boolean installed;
     private boolean installing;
     private boolean configured;
@@ -60,6 +72,7 @@ final class AdBlockEngine {
         this.listener = listener;
         preferences = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
         enabled = preferences.getBoolean(ENABLED_KEY, true);
+        mediaDetectionEnabled = preferences.getBoolean(MEDIA_DETECTION_KEY, true);
         Set<String> savedSites = preferences.getStringSet(ALLOWED_SITES_KEY, new HashSet<>());
         for (String site : savedSites) {
             String normalized = normalizeDomain(site);
@@ -203,10 +216,34 @@ final class AdBlockEngine {
                 String url = data.optString("url", "");
                 String pageUrl = data.optString("pageUrl", "");
                 String mediaType = data.optString("mediaType", "");
+                String pageTitle = data.optString("pageTitle", "").trim();
+                String thumbnailUrl = data.optString("thumbnailUrl", "");
+                if (pageTitle.length() > 200) {
+                    pageTitle = pageTitle.substring(0, 200);
+                }
+                if (!isHttpUrl(thumbnailUrl) || thumbnailUrl.length() > 2048) {
+                    thumbnailUrl = "";
+                }
                 if (listener != null && isHttpUrl(url) && isHttpUrl(pageUrl)
                         && ("HLS".equals(mediaType) || "DASH".equals(mediaType)
                         || "Video".equals(mediaType))) {
-                    listener.onMediaDetected(url, pageUrl, mediaType);
+                    listener.onMediaDetected(
+                            url,
+                            pageUrl,
+                            mediaType,
+                            pageTitle,
+                            thumbnailUrl,
+                            Math.max(0, Math.min(data.optInt("videoWidth", 0), 16384)),
+                            Math.max(0, Math.min(data.optInt("videoHeight", 0), 16384)),
+                            Math.max(0, Math.min(data.optInt("durationSeconds", 0), 604800)));
+                }
+                break;
+            case "page-scroll":
+                String scrollPageUrl = data.optString("pageUrl", "");
+                String direction = data.optString("direction", "");
+                if (listener != null && isHttpUrl(scrollPageUrl)
+                        && ("up".equals(direction) || "down".equals(direction))) {
+                    listener.onPageScroll(scrollPageUrl, "down".equals(direction));
                 }
                 break;
             default:
@@ -226,6 +263,7 @@ final class AdBlockEngine {
             JSONObject message = new JSONObject()
                     .put("type", "configure")
                     .put("enabled", enabled)
+                    .put("mediaDetectionEnabled", mediaDetectionEnabled)
                     .put("allowedSites", exceptions);
             nativePort.postMessage(message);
         } catch (JSONException exception) {
@@ -238,6 +276,16 @@ final class AdBlockEngine {
         preferences.edit().putBoolean(ENABLED_KEY, enabled).apply();
         sendConfiguration();
         notifyStateChanged();
+    }
+
+    boolean isMediaDetectionEnabled() {
+        return mediaDetectionEnabled;
+    }
+
+    void setMediaDetectionEnabled(boolean enabled) {
+        mediaDetectionEnabled = enabled;
+        preferences.edit().putBoolean(MEDIA_DETECTION_KEY, enabled).apply();
+        sendConfiguration();
     }
 
     boolean toggleSiteException(String host) {

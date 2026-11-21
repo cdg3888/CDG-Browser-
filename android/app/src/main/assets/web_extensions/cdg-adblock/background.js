@@ -12,6 +12,7 @@
   const blockedDomains = new Set(DEFAULT_DOMAINS);
 
   let enabled = false;
+  let mediaDetectionEnabled = true;
   let configured = false;
   let configurationReceived = false;
   let filtersLoaded = false;
@@ -22,7 +23,7 @@
   let updateInProgress = false;
   let nativePort = null;
   let reconnectDelayMs = 500;
-  const reportedMedia = new Set();
+  const reportedMedia = new Map();
 
   function send(message) {
     if (nativePort) {
@@ -67,11 +68,11 @@
     return false;
   }
 
-  function reportMedia(details, contentType, isPlaying = false) {
+  function reportMedia(details, contentType, isPlaying = false, pageMetadata = null) {
     const pageUrl = details.documentUrl || details.originUrl || details.initiator;
     const urlType = CDGMediaSniffer.classify(details.url);
     const responseType = CDGMediaSniffer.classifyContentType(contentType);
-    const mediaType = details.incognito === true
+    const mediaType = details.incognito === true || !mediaDetectionEnabled
       ? null
       : responseType || urlType;
     if (mediaType === "Video" && !isPlaying
@@ -80,16 +81,41 @@
     }
     if (mediaType && pageUrl) {
       const key = `${pageUrl}\n${details.url}`;
-      if (!reportedMedia.has(key)) {
-        reportedMedia.add(key);
+      const previous = reportedMedia.get(key) || {};
+      const metadata = {
+        pageTitle: typeof pageMetadata?.pageTitle === "string"
+          ? pageMetadata.pageTitle.trim().slice(0, 200) : "",
+        thumbnailUrl: typeof pageMetadata?.thumbnailUrl === "string"
+          && pageMetadata.thumbnailUrl.length <= 2048
+          && /^https?:\/\//i.test(pageMetadata.thumbnailUrl)
+          ? pageMetadata.thumbnailUrl : "",
+        videoWidth: Number.isInteger(pageMetadata?.videoWidth)
+          ? Math.min(Math.max(pageMetadata.videoWidth, 0), 16384) : 0,
+        videoHeight: Number.isInteger(pageMetadata?.videoHeight)
+          ? Math.min(Math.max(pageMetadata.videoHeight, 0), 16384) : 0,
+        durationSeconds: Number.isInteger(pageMetadata?.durationSeconds)
+          ? Math.min(Math.max(pageMetadata.durationSeconds, 0), 604800) : 0
+      };
+      const combined = {
+        pageTitle: metadata.pageTitle || previous.pageTitle || "",
+        thumbnailUrl: metadata.thumbnailUrl || previous.thumbnailUrl || "",
+        videoWidth: metadata.videoWidth || previous.videoWidth || 0,
+        videoHeight: metadata.videoHeight || previous.videoHeight || 0,
+        durationSeconds: metadata.durationSeconds || previous.durationSeconds || 0
+      };
+      const changed = !reportedMedia.has(key)
+        || Object.keys(combined).some((field) => combined[field] !== previous[field]);
+      if (changed) {
+        reportedMedia.set(key, combined);
         if (reportedMedia.size > 200) {
-          reportedMedia.delete(reportedMedia.values().next().value);
+          reportedMedia.delete(reportedMedia.keys().next().value);
         }
         send({
           type: "media-detected",
           mediaType,
           url: details.url,
-          pageUrl
+          pageUrl,
+          ...combined
         });
       }
     }
@@ -97,7 +123,20 @@
 
   browser.runtime.onMessage.addListener((message, sender) => {
     if (!message || message.type !== "page-media-detected"
+        && message.type !== "page-scroll"
         || sender.tab?.incognito === true) {
+      return;
+    }
+    if (message.type === "page-scroll") {
+      const pageUrl = sender.url || sender.tab?.url;
+      if (pageUrl && getHost(pageUrl)
+          && (message.direction === "up" || message.direction === "down")) {
+        send({
+          type: "page-scroll",
+          pageUrl,
+          direction: message.direction
+        });
+      }
       return;
     }
     const url = typeof message.url === "string" ? message.url : "";
@@ -109,7 +148,7 @@
         documentUrl: pageUrl,
         type: "media",
         incognito: sender.tab?.incognito === true
-      }, null, true);
+      }, null, true, message);
     }
   });
 
@@ -249,6 +288,11 @@
       }
       if (message.type === "configure") {
         enabled = message.enabled === true;
+        const nextMediaDetectionEnabled = message.mediaDetectionEnabled !== false;
+        if (nextMediaDetectionEnabled !== mediaDetectionEnabled) {
+          reportedMedia.clear();
+        }
+        mediaDetectionEnabled = nextMediaDetectionEnabled;
         configurationReceived = true;
         configured = filtersLoaded;
         allowedSites = new Set(

@@ -33,6 +33,9 @@ class YtDlpFormatsTest {
         assertEquals("https://images.example/thumb.jpg", media?.thumbnailUrl)
         assertEquals(1, media?.formats?.size)
         assertEquals("combined-720", media?.formats?.single()?.selector)
+        assertEquals(720, media?.formats?.single()?.height)
+        assertEquals(1400, media?.formats?.single()?.bitrateKbps)
+        assertTrue(media?.formats?.single()?.title?.contains("1400 kb/s") == true)
         assertTrue(media?.formats?.single()?.details?.contains("audio y video") == true)
         assertTrue(media?.formats?.single()?.details?.contains("avc1.64001f") == true)
     }
