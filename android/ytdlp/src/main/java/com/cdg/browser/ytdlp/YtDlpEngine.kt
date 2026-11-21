@@ -3,10 +3,15 @@ package com.cdg.browser.ytdlp
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import com.farimarwat.commons.UpdateChannel
+import com.farimarwat.commons.UpdateStatus
 import com.farimarwat.commons.YoutubeDLRequest
 import com.farimarwat.library.YoutubeDL
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class YtDlpEngine(context: Context) {
     interface ResultCallback {
@@ -23,6 +28,11 @@ class YtDlpEngine(context: Context) {
         fun onStarted(processId: String)
         fun onProgress(percent: Float, etaSeconds: Long, status: String)
         fun onComplete(file: File)
+        fun onError(message: String)
+    }
+
+    interface UpdateCallback {
+        fun onComplete(version: String, updated: Boolean)
         fun onError(message: String)
     }
 
@@ -94,7 +104,62 @@ class YtDlpEngine(context: Context) {
         )
     }
 
-    fun download(url: String, outputDirectory: File, callback: DownloadCallback) {
+    fun version(): String {
+        if (!initialized) {
+            return "No inicializado"
+        }
+        return YoutubeDL.versionName(appContext) ?: "Desconocida"
+    }
+
+    fun update(callback: UpdateCallback) {
+        if (!initialized) {
+            mainHandler.post { callback.onError("El motor yt-dlp todavía no está listo.") }
+            return
+        }
+        if (YoutubeDL.getInProgressDownloadsCount() > 0) {
+            mainHandler.post {
+                callback.onError("Espera a que terminen las descargas antes de actualizar yt-dlp.")
+            }
+            return
+        }
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val previousVersion = YoutubeDL.versionName(appContext) ?: "Desconocida"
+                var updateError: Throwable? = null
+                var updateStatus: UpdateStatus? = null
+                YoutubeDL.updateYoutubeDL(
+                    appContext,
+                    UpdateChannel.STABLE,
+                    { status -> updateStatus = status },
+                    { error -> updateError = error }
+                )
+                if (updateError != null) {
+                    val message = updateError?.message ?: "No se pudo actualizar yt-dlp."
+                    mainHandler.post { callback.onError(message) }
+                    return@launch
+                }
+                val version = YoutubeDL.versionName(appContext) ?: "Desconocida"
+                mainHandler.post {
+                    callback.onComplete(
+                        version,
+                        updateStatus == UpdateStatus.DONE || version != previousVersion
+                    )
+                }
+            } catch (error: Exception) {
+                val message = error.message ?: "No se pudo actualizar yt-dlp."
+                mainHandler.post { callback.onError(message) }
+            }
+        }
+    }
+
+    fun download(
+        url: String,
+        outputDirectory: File,
+        formatSelector: String,
+        audioOnly: Boolean,
+        includeSubtitles: Boolean,
+        callback: DownloadCallback
+    ) {
         if (!initialized) {
             mainHandler.post { callback.onError("El motor yt-dlp todavía no está listo.") }
             return
@@ -109,9 +174,20 @@ class YtDlpEngine(context: Context) {
         val processId = UUID.randomUUID().toString()
         val request = YoutubeDLRequest(url)
             .addOption("--no-playlist")
-            .addOption("-f", "bestvideo*+bestaudio/best")
-            .addOption("--merge-output-format", "mp4/mkv")
+            .addOption("-f", formatSelector)
             .addOption("-o", File(outputDirectory, "%(title).80B.%(ext)s").absolutePath)
+        if (audioOnly) {
+            request.addOption("-x")
+                .addOption("--audio-format", "mp3")
+                .addOption("--audio-quality", "0")
+        } else {
+            request.addOption("--merge-output-format", "mp4/mkv")
+            if (includeSubtitles) {
+                request.addOption("--write-subs")
+                    .addOption("--embed-subs")
+                    .addOption("--sub-langs", "all,-live_chat")
+            }
+        }
 
         YoutubeDL.download(
             request,
@@ -126,7 +202,10 @@ class YtDlpEngine(context: Context) {
                 val file = outputDirectory.listFiles()
                     ?.filter {
                         it.isFile && it.extension.lowercase() in
-                            setOf("mp4", "m4v", "mov", "webm", "mkv", "avi", "mpeg", "mpg", "3gp")
+                                setOf(
+                                    "mp4", "m4v", "mov", "webm", "mkv", "avi", "mpeg", "mpg", "3gp",
+                                    "mp3", "m4a", "opus", "flac", "wav"
+                                )
                     }
                     ?.maxByOrNull { it.lastModified() }
                 if (file == null) {

@@ -61,11 +61,12 @@
     return false;
   }
 
-  function reportMedia(details) {
+  function reportMedia(details, contentType) {
     const pageUrl = details.documentUrl || details.originUrl || details.initiator;
     const mediaType = details.incognito === true
       ? null
-      : CDGMediaSniffer.classify(details.url);
+      : CDGMediaSniffer.classify(details.url)
+        || CDGMediaSniffer.classifyContentType(contentType);
     if (mediaType && pageUrl) {
       const key = `${pageUrl}\n${details.url}`;
       if (!reportedMedia.has(key)) {
@@ -105,10 +106,25 @@
     return {};
   }
 
+  function handleResponseHeaders(details) {
+    const contentType = details.responseHeaders
+      ?.find((header) => header.name.toLowerCase() === "content-type")
+      ?.value;
+    if (contentType) {
+      reportMedia(details, contentType);
+    }
+    return {};
+  }
+
   browser.webRequest.onBeforeRequest.addListener(
     handleRequest,
     { urls: ["<all_urls>"] },
     ["blocking"]
+  );
+  browser.webRequest.onHeadersReceived.addListener(
+    handleResponseHeaders,
+    { urls: ["http://*/*", "https://*/*"] },
+    ["responseHeaders"]
   );
 
   async function loadSavedFilters() {

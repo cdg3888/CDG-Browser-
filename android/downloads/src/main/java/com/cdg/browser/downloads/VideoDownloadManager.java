@@ -2,6 +2,7 @@ package com.cdg.browser.downloads;
 
 import android.content.ContentValues;
 import android.content.Context;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
@@ -13,12 +14,17 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URLDecoder;
+import java.util.ArrayList;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -26,13 +32,31 @@ public final class VideoDownloadManager implements AutoCloseable {
     public interface Listener {
         void onProgress(long bytes);
 
-        void onComplete(String location, long bytes);
+        void onComplete(String location, String filename, long bytes);
 
         void onError(String message);
     }
 
+    private static final class DownloadTask {
+        final String id = UUID.randomUUID().toString();
+        final InputStream input;
+        final Listener listener;
+        final AtomicBoolean completed = new AtomicBoolean();
+        volatile Future<?> future;
+        volatile OutputStream output;
+        volatile Uri mediaUri;
+        volatile File localFile;
+        volatile boolean cancelled;
+
+        DownloadTask(InputStream input, Listener listener) {
+            this.input = input;
+            this.listener = listener;
+        }
+    }
+
     private final Context appContext;
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final ExecutorService executor = Executors.newFixedThreadPool(3);
+    private final Map<String, DownloadTask> tasks = new ConcurrentHashMap<>();
 
     public VideoDownloadManager(Context context) {
         appContext = Objects.requireNonNull(context, "context").getApplicationContext();
@@ -133,96 +157,180 @@ public final class VideoDownloadManager implements AutoCloseable {
         return filename + extension;
     }
 
-    public void download(
+    public static boolean supportsDownloadFile(String filename) {
+        return isVideoFilename(filename) || isAudioFilename(filename);
+    }
+
+    public static String normalizedMediaMimeType(String filename) {
+        String lower = filename == null ? "" : filename.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".mp3")) {
+            return "audio/mpeg";
+        }
+        if (lower.endsWith(".m4a")) {
+            return "audio/mp4";
+        }
+        if (lower.endsWith(".opus")) {
+            return "audio/ogg";
+        }
+        if (lower.endsWith(".flac")) {
+            return "audio/flac";
+        }
+        if (lower.endsWith(".wav")) {
+            return "audio/wav";
+        }
+        return normalizedVideoMimeType(null, filename);
+    }
+
+    public String download(
             InputStream input,
             String filename,
             String mimeType,
             Listener listener) {
         Objects.requireNonNull(listener, "listener");
-        if (input == null || !supportsDirectVideo(mimeType, filename)) {
+        if (input == null || !(supportsDirectVideo(mimeType, filename)
+                || isAudioMime(mimeType) || isAudioFilename(filename))) {
             closeQuietly(input);
-            listener.onError("Solo se admiten archivos de video directos compatibles.");
-            return;
+            listener.onError("El formato de descarga no es compatible.");
+            return null;
         }
-        String safeFilename = withVideoExtension(sanitizeFilename(filename), mimeType);
-        String safeMimeType = normalizedVideoMimeType(mimeType, safeFilename);
+        String safeFilename = withMediaExtension(sanitizeFilename(filename), mimeType);
+        String safeMimeType = isAudioFilename(safeFilename)
+                ? normalizedMediaMimeType(safeFilename)
+                : normalizedVideoMimeType(mimeType, safeFilename);
+        DownloadTask task = new DownloadTask(input, listener);
+        tasks.put(task.id, task);
         try {
-            executor.execute(() -> writeDownload(input, safeFilename, safeMimeType, listener));
+            task.future = executor.submit(() -> writeDownload(task, safeFilename, safeMimeType));
+            return task.id;
         } catch (RejectedExecutionException exception) {
+            tasks.remove(task.id);
             closeQuietly(input);
             listener.onError("El gestor de descargas ya está cerrado.");
+            return null;
         }
     }
 
+    public boolean cancel(String taskId) {
+        DownloadTask task = tasks.get(taskId);
+        if (task == null || !task.completed.compareAndSet(false, true)) {
+            return false;
+        }
+        task.cancelled = true;
+        closeQuietly(task.input);
+        closeQuietly(task.output);
+        Future<?> future = task.future;
+        if (future != null) {
+            future.cancel(true);
+        }
+        String cleanupError = deletePartialDownload(task);
+        tasks.remove(task.id);
+        task.listener.onError(cleanupError == null
+                ? "Descarga cancelada."
+                : "Descarga cancelada. " + cleanupError);
+        return true;
+    }
+
     private void writeDownload(
-            InputStream input,
+            DownloadTask task,
             String filename,
-            String mimeType,
-            Listener listener) {
-        Uri mediaUri = null;
-        File localFile = null;
+            String mimeType) {
         long bytes = 0;
-        try (InputStream source = input) {
+        try (InputStream source = task.input) {
+            if (task.cancelled) {
+                throw new IOException("Descarga cancelada.");
+            }
             OutputStream output;
+            String savedFilename = filename;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                String relativePath = Environment.DIRECTORY_DOWNLOADS + "/CDG Browser/";
+                savedFilename = uniqueMediaStoreFilename(filename, relativePath);
                 ContentValues values = new ContentValues();
-                values.put(MediaStore.Video.Media.DISPLAY_NAME, filename);
-                values.put(MediaStore.Video.Media.MIME_TYPE, mimeType);
-                values.put(MediaStore.Video.Media.RELATIVE_PATH,
-                        Environment.DIRECTORY_MOVIES + "/CDG Browser");
-                values.put(MediaStore.Video.Media.IS_PENDING, 1);
-                mediaUri = appContext.getContentResolver().insert(
-                        MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
-                if (mediaUri == null) {
+                values.put(MediaStore.Downloads.DISPLAY_NAME, savedFilename);
+                values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
+                values.put(MediaStore.Downloads.RELATIVE_PATH, relativePath);
+                values.put(MediaStore.Downloads.IS_PENDING, 1);
+                task.mediaUri = appContext.getContentResolver().insert(
+                        MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
+                if (task.mediaUri == null) {
                     throw new IOException("No se pudo crear el archivo de destino.");
                 }
-                output = appContext.getContentResolver().openOutputStream(mediaUri);
+                output = appContext.getContentResolver().openOutputStream(task.mediaUri);
                 if (output == null) {
                     throw new IOException("No se pudo abrir el archivo de destino.");
                 }
             } else {
-                File directory = appContext.getExternalFilesDir(Environment.DIRECTORY_MOVIES);
+                File directory = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
                 if (directory == null || (!directory.exists() && !directory.mkdirs())) {
                     throw new IOException("No se pudo crear la carpeta de descargas.");
                 }
-                localFile = new File(directory, filename);
-                output = new FileOutputStream(localFile);
+                savedFilename = uniqueFileName(directory, filename);
+                task.localFile = new File(directory, savedFilename);
+                output = new FileOutputStream(task.localFile);
             }
+            task.output = output;
 
             try (OutputStream destination = output) {
                 byte[] buffer = new byte[16 * 1024];
                 int count;
-                listener.onProgress(0);
+                task.listener.onProgress(0);
                 while ((count = source.read(buffer)) != -1) {
+                    if (task.cancelled || Thread.currentThread().isInterrupted()) {
+                        throw new IOException("Descarga cancelada.");
+                    }
                     destination.write(buffer, 0, count);
                     bytes += count;
                     if (bytes % (512 * 1024) < buffer.length) {
-                        listener.onProgress(bytes);
+                        task.listener.onProgress(bytes);
                     }
                 }
             }
+            task.output = null;
+            if (task.cancelled) {
+                throw new IOException("Descarga cancelada.");
+            }
 
             String location;
-            if (mediaUri != null) {
+            if (task.mediaUri != null) {
                 ContentValues values = new ContentValues();
-                values.put(MediaStore.Video.Media.IS_PENDING, 0);
-                appContext.getContentResolver().update(mediaUri, values, null, null);
-                location = mediaUri.toString();
+                values.put(MediaStore.Downloads.IS_PENDING, 0);
+                appContext.getContentResolver().update(task.mediaUri, values, null, null);
+                location = task.mediaUri.toString();
             } else {
-                location = localFile.getAbsolutePath();
+                location = task.localFile.getAbsolutePath();
             }
-            listener.onComplete(location, bytes);
+            if (task.completed.compareAndSet(false, true)) {
+                task.listener.onComplete(location, savedFilename, bytes);
+            }
         } catch (Exception exception) {
-            if (mediaUri != null) {
-                appContext.getContentResolver().delete(mediaUri, null, null);
+            String cleanupError = deletePartialDownload(task);
+            String message = task.cancelled ? "Descarga cancelada." : exception.getMessage();
+            if (cleanupError != null) {
+                message = (message == null || message.isEmpty()
+                        ? "Falló la descarga." : message) + " " + cleanupError;
             }
-            if (localFile != null && localFile.exists() && !localFile.delete()) {
-                exception.addSuppressed(new IOException("No se pudo eliminar la descarga incompleta."));
+            if (task.completed.compareAndSet(false, true)) {
+                task.listener.onError(message == null || message.isEmpty()
+                        ? "Falló la descarga del video." : message);
             }
-            String message = exception.getMessage();
-            listener.onError(message == null || message.isEmpty()
-                    ? "Falló la descarga del video." : message);
+        } finally {
+            task.output = null;
+            tasks.remove(task.id);
         }
+    }
+
+    private String deletePartialDownload(DownloadTask task) {
+        String error = null;
+        if (task.mediaUri != null) {
+            try {
+                appContext.getContentResolver().delete(task.mediaUri, null, null);
+            } catch (RuntimeException exception) {
+                error = "No se pudo eliminar el archivo incompleto: " + exception.getMessage();
+            }
+        }
+        if (task.localFile != null && task.localFile.exists() && !task.localFile.delete()) {
+            error = "No se pudo eliminar la descarga incompleta.";
+        }
+        return error;
     }
 
     private static String getHeader(Map<String, String> headers, String name) {
@@ -259,6 +367,103 @@ public final class VideoDownloadManager implements AutoCloseable {
                 .matches(".*\\.(mp4|m4v|mov|webm|mkv|avi|mpeg|mpg|3gp)$");
     }
 
+    private static boolean isAudioFilename(String filename) {
+        if (filename == null) {
+            return false;
+        }
+        return filename.toLowerCase(Locale.ROOT).matches(".*\\.(mp3|m4a|opus|flac|wav)$");
+    }
+
+    private static boolean isAudioMime(String mimeType) {
+        if (mimeType == null) {
+            return false;
+        }
+        String normalized = mimeType.toLowerCase(Locale.ROOT);
+        return normalized.equals("audio/mpeg")
+                || normalized.equals("audio/mp4")
+                || normalized.equals("audio/ogg")
+                || normalized.equals("audio/flac")
+                || normalized.equals("audio/wav")
+                || normalized.equals("audio/x-wav");
+    }
+
+    private static String withMediaExtension(String filename, String mimeType) {
+        if (isVideoFilename(filename) || isAudioFilename(filename) || mimeType == null) {
+            return filename;
+        }
+        if (isAudioMime(mimeType)) {
+            String extension;
+            switch (mimeType.toLowerCase(Locale.ROOT)) {
+                case "audio/mp4":
+                    extension = ".m4a";
+                    break;
+                case "audio/ogg":
+                    extension = ".opus";
+                    break;
+                case "audio/flac":
+                    extension = ".flac";
+                    break;
+                case "audio/wav":
+                case "audio/x-wav":
+                    extension = ".wav";
+                    break;
+                default:
+                    extension = ".mp3";
+            }
+            return filename + extension;
+        }
+        return withVideoExtension(filename, mimeType);
+    }
+
+    private String uniqueMediaStoreFilename(String filename, String relativePath)
+            throws IOException {
+        String stem = filename;
+        String extension = "";
+        int dot = filename.lastIndexOf('.');
+        if (dot > 0) {
+            stem = filename.substring(0, dot);
+            extension = filename.substring(dot);
+        }
+        Uri collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+        for (int suffix = 0; suffix < 1000; suffix++) {
+            String candidate = suffix == 0
+                    ? filename : stem + " (" + suffix + ")" + extension;
+            try (Cursor cursor = appContext.getContentResolver().query(
+                    collection,
+                    new String[]{MediaStore.Downloads.DISPLAY_NAME},
+                    MediaStore.Downloads.DISPLAY_NAME + " = ? AND "
+                            + MediaStore.Downloads.RELATIVE_PATH + " = ?",
+                    new String[]{candidate, relativePath},
+                    null)) {
+                if (cursor == null) {
+                    throw new IOException("No se pudo comprobar si el nombre ya existe.");
+                }
+                if (!cursor.moveToFirst()) {
+                    return candidate;
+                }
+            }
+        }
+        throw new IOException("No se encontró un nombre libre para el archivo.");
+    }
+
+    private static String uniqueFileName(File directory, String filename) throws IOException {
+        String stem = filename;
+        String extension = "";
+        int dot = filename.lastIndexOf('.');
+        if (dot > 0) {
+            stem = filename.substring(0, dot);
+            extension = filename.substring(dot);
+        }
+        for (int suffix = 0; suffix < 1000; suffix++) {
+            String candidate = suffix == 0
+                    ? filename : stem + " (" + suffix + ")" + extension;
+            if (!new File(directory, candidate).exists()) {
+                return candidate;
+            }
+        }
+        throw new IOException("No se encontró un nombre libre para el archivo.");
+    }
+
     private static String sanitizeFilename(String filename) {
         if (filename == null || filename.isEmpty()) {
             return "video";
@@ -281,8 +486,22 @@ public final class VideoDownloadManager implements AutoCloseable {
         }
     }
 
+    private static void closeQuietly(OutputStream output) {
+        if (output == null) {
+            return;
+        }
+        try {
+            output.close();
+        } catch (IOException ignored) {
+            // The output is discarded after cancellation.
+        }
+    }
+
     @Override
     public void close() {
+        for (String taskId : new ArrayList<>(tasks.keySet())) {
+            cancel(taskId);
+        }
         executor.shutdown();
     }
 }

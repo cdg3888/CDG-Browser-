@@ -3,9 +3,11 @@ package com.cdg.browser;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.annotation.SuppressLint;
+import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -16,13 +18,16 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
@@ -42,6 +47,7 @@ import org.mozilla.geckoview.GeckoSession;
 import org.mozilla.geckoview.GeckoSessionSettings;
 import org.mozilla.geckoview.GeckoView;
 import org.mozilla.geckoview.WebResponse;
+import androidx.core.content.FileProvider;
 import com.cdg.browser.downloads.VideoDownloadManager;
 import com.cdg.browser.ytdlp.YtDlpEngine;
 
@@ -78,6 +84,8 @@ public final class MainActivity extends Activity {
     private final List<BrowserTab> tabs = new ArrayList<>();
     private final List<DownloadEntry> downloads = new ArrayList<>();
     private final LinkedHashMap<String, DetectedMedia> detectedMedia = new LinkedHashMap<>();
+    private final LinkedHashMap<String, TextView> detectedMediaStatusViews = new LinkedHashMap<>();
+    private final LinkedHashMap<String, Button> detectedMediaDownloadButtons = new LinkedHashMap<>();
 
     private GeckoView browserView;
     private GeckoSession session;
@@ -91,6 +99,9 @@ public final class MainActivity extends Activity {
     private LinearLayout addressRow;
     private LinearLayout downloadsList;
     private AlertDialog downloadsDialog;
+    private AlertDialog detectedMediaDialog;
+    private LinearLayout detectedMediaList;
+    private EditText mediaSearchField;
     private Button privateButton;
     private Button addressToggleButton;
     private Button favoriteButton;
@@ -104,6 +115,8 @@ public final class MainActivity extends Activity {
     private boolean addressBarVisible = true;
     private boolean canGoBack;
     private boolean initialNavigationStarted;
+    private String mediaTypeFilter = "Todos";
+    private boolean showAllDetectedMedia;
     private String currentUrl = HOME_URL;
     private String statusMessage = "Protección estricta GeckoView activa";
     private final Runnable adBlockStartupFallback = () -> {
@@ -127,18 +140,30 @@ public final class MainActivity extends Activity {
         String status;
         String location;
         String engine;
+        String url;
+        String formatSelector;
         String processId;
+        boolean audioOnly;
+        boolean includeSubtitles;
+        boolean copying;
         long bytes;
+        long lastPersistAt;
     }
 
     private static final class DetectedMedia {
+        final String key;
         final String url;
         final String pageUrl;
+        final String pageTitle;
         final String type;
+        String downloadStatus = "Disponible";
+        boolean downloadActive;
 
-        DetectedMedia(String url, String pageUrl, String type) {
+        DetectedMedia(String key, String url, String pageUrl, String pageTitle, String type) {
+            this.key = key;
             this.url = url;
             this.pageUrl = pageUrl;
+            this.pageTitle = pageTitle;
             this.type = type;
         }
     }
@@ -603,13 +628,27 @@ public final class MainActivity extends Activity {
                 || "Video".equals(mediaType))) {
             return;
         }
-        detectedMedia.remove(url);
-        detectedMedia.put(url, new DetectedMedia(url, pageUrl, mediaType));
+        String key = normalizeMediaUrl(url);
+        detectedMedia.remove(key);
+        detectedMedia.put(key, new DetectedMedia(
+                key, url, pageUrl, pageTitleForUrl(pageUrl), mediaType));
         if (detectedMedia.size() > 100) {
             String oldest = detectedMedia.keySet().iterator().next();
             detectedMedia.remove(oldest);
         }
         updateDetectedMediaButton();
+        renderDetectedMediaItems();
+    }
+
+    private String pageTitleForUrl(String pageUrl) {
+        String normalizedUrl = Uri.parse(pageUrl).buildUpon().fragment(null).build().toString();
+        for (BrowserTab tab : tabs) {
+            String tabUrl = Uri.parse(tab.url).buildUpon().fragment(null).build().toString();
+            if (normalizedUrl.equals(tabUrl) && tab.title != null && !tab.title.isEmpty()) {
+                return tab.title;
+            }
+        }
+        return "";
     }
 
     private void updateDetectedMediaButton() {
@@ -630,17 +669,7 @@ public final class MainActivity extends Activity {
     }
 
     private void showDetectedMedia() {
-        String currentHost = Uri.parse(currentUrl).getHost();
-        List<DetectedMedia> items = new ArrayList<>();
-        if (currentHost != null) {
-            for (DetectedMedia item : detectedMedia.values()) {
-                String pageHost = Uri.parse(item.pageUrl).getHost();
-                if (pageHost != null && currentHost.equalsIgnoreCase(pageHost)) {
-                    items.add(item);
-                }
-            }
-        }
-        if (items.isEmpty()) {
+        if (detectedMedia.isEmpty()) {
             dialogBuilder()
                     .setTitle("Medios detectados")
                     .setMessage("Aún no se detectaron enlaces HLS, DASH o de video en este sitio.")
@@ -649,19 +678,138 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        LinearLayout list = new LinearLayout(this);
-        list.setOrientation(LinearLayout.VERTICAL);
-        for (DetectedMedia item : items) {
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(8), dp(4), dp(8), dp(4));
+        mediaSearchField = new EditText(this);
+        mediaSearchField.setSingleLine(true);
+        mediaSearchField.setInputType(InputType.TYPE_CLASS_TEXT);
+        mediaSearchField.setHint("Buscar URL, página o tipo");
+        mediaSearchField.setPadding(dp(12), dp(8), dp(12), dp(8));
+        content.addView(mediaSearchField);
+
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setGravity(Gravity.CENTER_VERTICAL);
+        Button scopeButton = button(
+                showAllDetectedMedia ? "Todos los sitios" : "Sitio actual",
+                () -> { });
+        scopeButton.setOnClickListener(view -> {
+            showAllDetectedMedia = !showAllDetectedMedia;
+            scopeButton.setText(showAllDetectedMedia ? "Todos los sitios" : "Sitio actual");
+            renderDetectedMediaItems();
+        });
+        toolbar.addView(scopeButton, new LinearLayout.LayoutParams(0, -2, 1));
+        toolbar.addView(button("Limpiar", () -> dialogBuilder()
+                .setTitle("Borrar medios detectados")
+                .setMessage("Se borrará la lista temporal de enlaces. No se eliminarán archivos descargados.")
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Borrar", (dialog, which) -> {
+                    detectedMedia.clear();
+                    updateDetectedMediaButton();
+                    renderDetectedMediaItems();
+                })
+                .show()));
+        content.addView(toolbar);
+
+        Button filterButton = button("Tipo: " + mediaTypeFilter, () -> { });
+        filterButton.setOnClickListener(view -> {
+            String[] filters = {"Todos", "HLS", "DASH", "Video"};
+            dialogBuilder()
+                    .setTitle("Filtrar por tipo")
+                    .setItems(filters, (dialog, which) -> {
+                        mediaTypeFilter = filters[which];
+                        filterButton.setText("Tipo: " + mediaTypeFilter);
+                        renderDetectedMediaItems();
+                    })
+                    .show();
+        });
+        content.addView(filterButton);
+
+        ScrollView scroll = new ScrollView(this);
+        detectedMediaList = new LinearLayout(this);
+        detectedMediaList.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(detectedMediaList);
+        content.addView(scroll, new LinearLayout.LayoutParams(-1, dp(360)));
+
+        mediaSearchField.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence value, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence value, int start, int before, int count) {
+                renderDetectedMediaItems();
+            }
+
+            @Override
+            public void afterTextChanged(Editable value) {
+            }
+        });
+
+        detectedMediaDialog = dialogBuilder()
+                .setTitle("Medios detectados · " + detectedMedia.size())
+                .setView(content)
+                .setNegativeButton("Cerrar", null)
+                .create();
+        detectedMediaDialog.setOnDismissListener(dialog -> {
+            detectedMediaDialog = null;
+            detectedMediaList = null;
+            mediaSearchField = null;
+            detectedMediaStatusViews.clear();
+            detectedMediaDownloadButtons.clear();
+        });
+        detectedMediaDialog.show();
+        renderDetectedMediaItems();
+    }
+
+    private void renderDetectedMediaItems() {
+        if (detectedMediaList == null || detectedMediaDialog == null
+                || !detectedMediaDialog.isShowing()) {
+            return;
+        }
+        detectedMediaList.removeAllViews();
+        detectedMediaStatusViews.clear();
+        detectedMediaDownloadButtons.clear();
+        String query = mediaSearchField == null ? "" : mediaSearchField.getText().toString()
+                .trim().toLowerCase(Locale.ROOT);
+        String currentHost = Uri.parse(currentUrl).getHost();
+        int shown = 0;
+        for (DetectedMedia item : detectedMedia.values()) {
+            if (!showAllDetectedMedia) {
+                String pageHost = Uri.parse(item.pageUrl).getHost();
+                if (currentHost == null || pageHost == null
+                        || !currentHost.equalsIgnoreCase(pageHost)) {
+                    continue;
+                }
+            }
+            if (!"Todos".equals(mediaTypeFilter) && !mediaTypeFilter.equals(item.type)) {
+                continue;
+            }
+            String searchable = (item.url + " " + item.pageUrl + " " + item.pageTitle + " " + item.type)
+                    .toLowerCase(Locale.ROOT);
+            if (!query.isEmpty() && !searchable.contains(query)) {
+                continue;
+            }
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.VERTICAL);
             row.setPadding(dp(12), dp(8), dp(12), dp(8));
             TextView label = new TextView(this);
-            label.setText(item.type + " · " + item.url);
+            String source = item.pageTitle.isEmpty()
+                    ? item.pageUrl : item.pageTitle + "\n" + item.pageUrl;
+            label.setText(item.type + "\nDetectado en: " + source + "\n" + item.url);
             label.setTextColor(colorText);
             label.setTextSize(12);
-            label.setMaxLines(3);
+            label.setMaxLines(5);
             label.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
             row.addView(label);
+
+            TextView status = new TextView(this);
+            status.setText(item.downloadStatus);
+            status.setTextColor(colorMuted);
+            status.setTextSize(12);
+            status.setPadding(0, dp(4), 0, 0);
+            row.addView(status);
+            detectedMediaStatusViews.put(item.key, status);
 
             LinearLayout actions = new LinearLayout(this);
             actions.setGravity(Gravity.END);
@@ -671,18 +819,63 @@ public final class MainActivity extends Activity {
                 clipboard.setPrimaryClip(ClipData.newPlainText("Enlace de medio", item.url));
                 Toast.makeText(this, "Enlace copiado", Toast.LENGTH_SHORT).show();
             }));
-            actions.addView(button("Descargar", () -> inspectWithYtDlp(item.url)));
+            Button downloadButton = button("Descargar", () -> {
+                setDetectedMediaStatus(item, "Analizando con yt-dlp…", true);
+                inspectWithYtDlp(item.url, item);
+            });
+            downloadButton.setEnabled(!item.downloadActive);
+            detectedMediaDownloadButtons.put(item.key, downloadButton);
+            actions.addView(downloadButton);
             row.addView(actions);
-            list.addView(row);
+            detectedMediaList.addView(row);
+            shown++;
         }
+        detectedMediaDialog.setTitle("Medios detectados · " + shown);
+        if (shown == 0) {
+            TextView empty = new TextView(this);
+            empty.setText("No hay resultados con estos filtros.");
+            empty.setTextColor(colorMuted);
+            empty.setPadding(dp(12), dp(16), dp(12), dp(16));
+            detectedMediaList.addView(empty);
+        }
+    }
 
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(list);
-        dialogBuilder()
-                .setTitle("Medios detectados · " + items.size())
-                .setView(scroll)
-                .setNegativeButton("Cerrar", null)
-                .show();
+    private void setDetectedMediaStatus(DetectedMedia item, String status, boolean active) {
+        item.downloadStatus = status;
+        item.downloadActive = active;
+        runOnUiThread(() -> {
+            TextView statusView = detectedMediaStatusViews.get(item.key);
+            if (statusView != null) {
+                statusView.setText(status);
+            }
+            Button downloadButton = detectedMediaDownloadButtons.get(item.key);
+            if (downloadButton != null) {
+                downloadButton.setEnabled(!active);
+            }
+        });
+    }
+
+    private String normalizeMediaUrl(String value) {
+        Uri uri = Uri.parse(value);
+        Uri.Builder builder = uri.buildUpon().fragment(null);
+        String encodedQuery = uri.getEncodedQuery();
+        if (encodedQuery != null) {
+            StringBuilder query = new StringBuilder();
+            for (String parameter : encodedQuery.split("&", -1)) {
+                String rawName = parameter.split("=", 2)[0];
+                String name = Uri.decode(rawName).toLowerCase(Locale.ROOT);
+                if (name.startsWith("utm_") || name.equals("fbclid") || name.equals("gclid")
+                        || name.equals("mc_cid") || name.equals("mc_eid")) {
+                    continue;
+                }
+                if (query.length() > 0) {
+                    query.append('&');
+                }
+                query.append(parameter);
+            }
+            builder.encodedQuery(query.length() == 0 ? null : query.toString());
+        }
+        return builder.build().toString();
     }
 
     private boolean isHttpUrl(String value) {
@@ -879,30 +1072,37 @@ public final class MainActivity extends Activity {
                 .setMessage(finalFilename + "\n\nSolo se descargará el archivo que el sitio ofrece directamente. No se extraen streams protegidos ni se evita DRM.")
                 .setNegativeButton("Cancelar", (dialog, which) -> closeQuietly(response.body))
                 .setPositiveButton("Descargar", (dialog, which) ->
-                        startVideoDownload(response.body, finalFilename, finalMimeType))
+                        startVideoDownload(response.body, finalFilename, finalMimeType,
+                                response.uri))
                 .setOnCancelListener(dialog -> closeQuietly(response.body))
                 .show());
     }
 
-    private void startVideoDownload(InputStream input, String filename, String mimeType) {
+    private void startVideoDownload(
+            InputStream input, String filename, String mimeType, String sourceUrl) {
         DownloadEntry entry = new DownloadEntry();
         entry.name = filename;
         entry.mimeType = mimeType;
+        entry.url = sourceUrl;
+        entry.engine = "direct";
         entry.status = "En cola";
-        downloads.add(0, entry);
+        addDownloadEntry(entry);
         refreshDownloadsDialog();
-        videoDownloadManager.download(input, filename, mimeType,
+        String taskId = videoDownloadManager.download(input, filename, mimeType,
                 new VideoDownloadManager.Listener() {
                     @Override
                     public void onProgress(long bytes) {
                         entry.bytes = bytes;
                         entry.status = "Descargando · " + formatBytes(bytes);
+                        persistDownloadIfDue(entry, false);
                         runOnUiThread(MainActivity.this::refreshDownloadsDialog);
                     }
 
                     @Override
-                    public void onComplete(String location, long bytes) {
+                    public void onComplete(String location, String savedFilename, long bytes) {
+                        entry.processId = null;
                         entry.location = location;
+                        entry.name = savedFilename;
                         entry.bytes = bytes;
                         entry.status = "Completada · " + formatBytes(bytes);
                         runOnUiThread(() -> {
@@ -913,10 +1113,19 @@ public final class MainActivity extends Activity {
 
                     @Override
                     public void onError(String message) {
-                        entry.status = "Error: " + message;
-                        runOnUiThread(MainActivity.this::refreshDownloadsDialog);
+                        entry.processId = null;
+                        entry.status = message.contains("cancelada")
+                                ? "Cancelada" : "Error: " + message;
+                        persistDownloadIfDue(entry, true);
+                        runOnUiThread(() -> {
+                            saveDownloads();
+                            refreshDownloadsDialog();
+                        });
                     }
                 });
+        if (isDownloadActive(entry)) {
+            entry.processId = taskId;
+        }
     }
 
     private void promptYtDlpDownload() {
@@ -932,6 +1141,7 @@ public final class MainActivity extends Activity {
                 .setMessage("Analiza la página actual o pega una dirección HTTP o HTTPS.")
                 .setView(urlField)
                 .setNegativeButton("Cancelar", null)
+                .setNeutralButton("Actualizar yt-dlp", (dialog, which) -> updateYtDlp())
                 .setPositiveButton("Analizar", (dialog, which) -> {
                     String target = urlField.getText().toString().trim();
                     Uri uri = Uri.parse(target);
@@ -948,24 +1158,80 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
+    private void updateYtDlp() {
+        AlertDialog progress = dialogBuilder()
+                .setTitle("Actualizando yt-dlp")
+                .setMessage("Comprobando la versión estable…")
+                .create();
+        progress.setCancelable(false);
+        progress.show();
+        ytDlpEngine.initialize(new YtDlpEngine.ResultCallback() {
+            @Override
+            public void onReady() {
+                ytDlpEngine.update(new YtDlpEngine.UpdateCallback() {
+                    @Override
+                    public void onComplete(String version, boolean updated) {
+                        progress.dismiss();
+                        Toast.makeText(MainActivity.this,
+                                updated ? "yt-dlp actualizado · " + version
+                                        : "yt-dlp ya está actualizado · " + version,
+                                Toast.LENGTH_LONG).show();
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        progress.dismiss();
+                        showYtDlpError(message);
+                    }
+                });
+            }
+
+            @Override
+            public void onError(String message) {
+                progress.dismiss();
+                showYtDlpError(message);
+            }
+        });
+    }
+
     private void inspectWithYtDlp(String url) {
+        inspectWithYtDlp(url, null);
+    }
+
+    private void inspectWithYtDlp(String url, DetectedMedia source) {
         boolean[] cancelled = {false};
         AlertDialog loading = dialogBuilder()
                 .setTitle("Preparando yt-dlp")
                 .setMessage("La primera inicialización puede tardar un poco.")
-                .setNegativeButton("Cerrar", (dialog, which) -> cancelled[0] = true)
+                .setNegativeButton("Cerrar", (dialog, which) -> {
+                    cancelled[0] = true;
+                    if (source != null) {
+                        setDetectedMediaStatus(source, "Análisis cancelado.", false);
+                    }
+                })
                 .create();
-        loading.setOnCancelListener(dialog -> cancelled[0] = true);
+        loading.setOnCancelListener(dialog -> {
+            cancelled[0] = true;
+            if (source != null) {
+                setDetectedMediaStatus(source, "Análisis cancelado.", false);
+            }
+        });
         loading.show();
         ytDlpEngine.initialize(new YtDlpEngine.ResultCallback() {
             @Override
             public void onReady() {
+                if (cancelled[0]) {
+                    return;
+                }
                 ytDlpEngine.getInfo(url, new YtDlpEngine.InfoCallback() {
                     @Override
                     public void onInfo(String title, int durationSeconds) {
                         loading.dismiss();
                         if (cancelled[0] || isFinishing()) {
                             return;
+                        }
+                        if (source != null) {
+                            setDetectedMediaStatus(source, "Listo para descargar: " + title, false);
                         }
                         String duration = durationSeconds > 0
                                 ? "\nDuración: " + formatDuration(durationSeconds)
@@ -977,14 +1243,17 @@ public final class MainActivity extends Activity {
                                         + "Solo descarga contenido que tengas derecho a guardar; "
                                         + "no evita DRM ni protecciones de acceso.")
                                 .setNegativeButton("Cancelar", null)
-                                .setPositiveButton("Descargar", (dialog, which) ->
-                                        startYtDlpDownload(url, title))
+                                .setPositiveButton("Elegir calidad", (dialog, which) ->
+                                        selectYtDlpQuality(url, title, source))
                                 .show();
                     }
 
                     @Override
                     public void onError(String message) {
                         loading.dismiss();
+                        if (!cancelled[0] && source != null) {
+                            setDetectedMediaStatus(source, "Error de análisis: " + message, false);
+                        }
                         if (!cancelled[0] && !isFinishing()) {
                             showYtDlpError(message);
                         }
@@ -995,6 +1264,9 @@ public final class MainActivity extends Activity {
             @Override
             public void onError(String message) {
                 loading.dismiss();
+                if (!cancelled[0] && source != null) {
+                    setDetectedMediaStatus(source, "Error de inicio: " + message, false);
+                }
                 if (!cancelled[0] && !isFinishing()) {
                     showYtDlpError(message);
                 }
@@ -1002,22 +1274,74 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void startYtDlpDownload(String url, String title) {
+    private void selectYtDlpQuality(String url, String title, DetectedMedia source) {
+        String[] qualities = {"Mejor disponible", "Hasta 1080p", "Hasta 720p", "Hasta 480p"};
+        String[] formats = {
+                "bestvideo*+bestaudio/best",
+                "bestvideo*[height<=1080]+bestaudio/best[height<=1080]/best",
+                "bestvideo*[height<=720]+bestaudio/best[height<=720]/best",
+                "bestvideo*[height<=480]+bestaudio/best[height<=480]/best"
+        };
+        LinearLayout options = new LinearLayout(this);
+        options.setOrientation(LinearLayout.VERTICAL);
+        CheckBox includeSubtitles = new CheckBox(this);
+        includeSubtitles.setText("Incluir subtítulos si están disponibles");
+        options.addView(includeSubtitles);
+        AlertDialog qualityDialog = dialogBuilder()
+                .setTitle("Calidad y formato")
+                .setView(options)
+                .setNegativeButton("Cancelar", null)
+                .create();
+        for (int i = 0; i < qualities.length; i++) {
+            final int qualityIndex = i;
+            options.addView(button(qualities[i], () -> {
+                boolean subtitles = includeSubtitles.isChecked();
+                qualityDialog.dismiss();
+                startYtDlpDownload(
+                        url, title, formats[qualityIndex], false, subtitles, source);
+            }));
+        }
+        options.addView(button("Solo audio · MP3", () -> {
+            qualityDialog.dismiss();
+            startYtDlpDownload(url, title, "bestaudio/best", true, false, source);
+        }));
+        qualityDialog.show();
+    }
+
+    private void startYtDlpDownload(
+            String url,
+            String title,
+            String formatSelector,
+            boolean audioOnly,
+            boolean includeSubtitles,
+            DetectedMedia source) {
         File temporaryDirectory = new File(
                 new File(getCacheDir(), "ytdlp"), UUID.randomUUID().toString());
         DownloadEntry entry = new DownloadEntry();
         entry.name = title;
-        entry.mimeType = "video/*";
+        entry.mimeType = audioOnly ? "audio/mpeg" : "video/*";
         entry.engine = "yt-dlp";
+        entry.url = url;
+        entry.formatSelector = formatSelector;
+        entry.audioOnly = audioOnly;
+        entry.includeSubtitles = includeSubtitles;
         entry.status = "En cola · yt-dlp";
-        downloads.add(0, entry);
+        addDownloadEntry(entry);
+        if (source != null) {
+            setDetectedMediaStatus(source, "En cola · " + title, true);
+        }
         refreshDownloadsDialog();
 
-        ytDlpEngine.download(url, temporaryDirectory, new YtDlpEngine.DownloadCallback() {
+        ytDlpEngine.download(url, temporaryDirectory, formatSelector, audioOnly, includeSubtitles,
+                new YtDlpEngine.DownloadCallback() {
             @Override
             public void onStarted(String processId) {
                 entry.processId = processId;
                 entry.status = "Iniciando yt-dlp…";
+                persistDownloadIfDue(entry, true);
+                if (source != null) {
+                    setDetectedMediaStatus(source, "Descargando…", true);
+                }
                 refreshDownloadsDialog();
             }
 
@@ -1028,25 +1352,36 @@ public final class MainActivity extends Activity {
                 entry.status = percent >= 0
                         ? String.format(Locale.ROOT, "yt-dlp · %.0f%%%s", percent, eta)
                         : "yt-dlp · " + (status.isEmpty() ? "procesando" : status);
+                persistDownloadIfDue(entry, false);
+                if (source != null) {
+                    setDetectedMediaStatus(source, entry.status, true);
+                }
                 refreshDownloadsDialog();
             }
 
             @Override
             public void onComplete(File file) {
                 entry.processId = null;
-                if (!VideoDownloadManager.supportsDirectVideo(null, file.getName())) {
-                    entry.status = "Error: yt-dlp no produjo un formato de video compatible.";
+                if (!VideoDownloadManager.supportsDownloadFile(file.getName())) {
+                    entry.status = "Error: yt-dlp no produjo un formato compatible.";
+                    if (source != null) {
+                        setDetectedMediaStatus(source, entry.status, false);
+                    }
                     cleanupYtDlpTemporaryFiles(temporaryDirectory);
+                    saveDownloads();
                     refreshDownloadsDialog();
                     return;
                 }
                 entry.name = file.getName();
-                entry.mimeType = VideoDownloadManager.normalizedVideoMimeType(
-                        null, file.getName());
-                entry.status = "Guardando en Películas/CDG Browser…";
+                entry.mimeType = VideoDownloadManager.normalizedMediaMimeType(file.getName());
+                entry.copying = true;
+                entry.status = "Guardando en Descargas/CDG Browser…";
+                if (source != null) {
+                    setDetectedMediaStatus(source, "Guardando en Descargas/CDG Browser…", true);
+                }
                 refreshDownloadsDialog();
                 try {
-                    videoDownloadManager.download(
+                    String taskId = videoDownloadManager.download(
                             new FileInputStream(file),
                             file.getName(),
                             entry.mimeType,
@@ -1055,14 +1390,24 @@ public final class MainActivity extends Activity {
                                 public void onProgress(long bytes) {
                                     entry.bytes = bytes;
                                     entry.status = "Guardando · " + formatBytes(bytes);
+                                    if (source != null) {
+                                        setDetectedMediaStatus(source, entry.status, true);
+                                    }
                                     refreshDownloadsDialog();
                                 }
 
                                 @Override
-                                public void onComplete(String location, long bytes) {
+                                public void onComplete(
+                                        String location, String savedFilename, long bytes) {
+                                    entry.processId = null;
+                                    entry.copying = false;
                                     entry.location = location;
+                                    entry.name = savedFilename;
                                     entry.bytes = bytes;
                                     entry.status = "Completada · " + formatBytes(bytes);
+                                    if (source != null) {
+                                        setDetectedMediaStatus(source, entry.status, false);
+                                    }
                                     cleanupYtDlpTemporaryFiles(temporaryDirectory);
                                     runOnUiThread(() -> {
                                         saveDownloads();
@@ -1072,14 +1417,31 @@ public final class MainActivity extends Activity {
 
                                 @Override
                                 public void onError(String message) {
-                                    entry.status = "Error al guardar: " + message;
+                                    entry.processId = null;
+                                    entry.copying = false;
+                                    entry.status = message.contains("cancelada")
+                                            ? "Cancelada" : "Error al guardar: " + message;
+                                    if (source != null) {
+                                        setDetectedMediaStatus(source, entry.status, false);
+                                    }
                                     cleanupYtDlpTemporaryFiles(temporaryDirectory);
-                                    refreshDownloadsDialog();
+                                    runOnUiThread(() -> {
+                                        saveDownloads();
+                                        refreshDownloadsDialog();
+                                    });
                                 }
                             });
+                    if (isDownloadActive(entry)) {
+                        entry.processId = taskId;
+                    }
                 } catch (IOException exception) {
+                    entry.copying = false;
                     entry.status = "Error al abrir el video: " + exception.getMessage();
+                    if (source != null) {
+                        setDetectedMediaStatus(source, entry.status, false);
+                    }
                     cleanupYtDlpTemporaryFiles(temporaryDirectory);
+                    saveDownloads();
                     refreshDownloadsDialog();
                 }
             }
@@ -1087,8 +1449,13 @@ public final class MainActivity extends Activity {
             @Override
             public void onError(String message) {
                 entry.processId = null;
-                entry.status = "Error yt-dlp: " + message;
+                entry.status = message.contains("cancel")
+                        ? "Cancelada" : "Error yt-dlp: " + message;
+                if (source != null) {
+                    setDetectedMediaStatus(source, entry.status, false);
+                }
                 cleanupYtDlpTemporaryFiles(temporaryDirectory);
+                saveDownloads();
                 refreshDownloadsDialog();
             }
         });
@@ -1104,6 +1471,42 @@ public final class MainActivity extends Activity {
             }
         }
         temporaryDirectory.delete();
+    }
+
+    private void persistDownloadIfDue(DownloadEntry entry, boolean force) {
+        long now = System.currentTimeMillis();
+        if (force || now - entry.lastPersistAt >= 3000) {
+            entry.lastPersistAt = now;
+            runOnUiThread(this::saveDownloads);
+        }
+    }
+
+    private void addDownloadEntry(DownloadEntry entry) {
+        downloads.add(0, entry);
+        while (downloads.size() > 100) {
+            int removable = -1;
+            for (int index = downloads.size() - 1; index >= 0; index--) {
+                if (!isDownloadActive(downloads.get(index))) {
+                    removable = index;
+                    break;
+                }
+            }
+            if (removable < 0) {
+                break;
+            }
+            downloads.remove(removable);
+        }
+        saveDownloads();
+    }
+
+    private boolean isDownloadActive(DownloadEntry entry) {
+        return entry.processId != null
+                || entry.status.startsWith("En cola")
+                || entry.status.startsWith("Iniciando")
+                || entry.status.startsWith("Descargando")
+                || entry.status.startsWith("Guardando")
+                || entry.status.startsWith("Cancelando")
+                || entry.status.startsWith("yt-dlp ·");
     }
 
     private void showYtDlpError(String message) {
@@ -1124,7 +1527,7 @@ public final class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.addView(downloadsList);
         downloadsDialog = dialogBuilder()
-                .setTitle("Descargas de video")
+                .setTitle("Descargas")
                 .setView(scroll)
                 .setNegativeButton("Cerrar", (dialog, which) -> {
                     downloadsDialog = null;
@@ -1147,16 +1550,28 @@ public final class MainActivity extends Activity {
             downloadsList.removeAllViews();
             TextView destination = new TextView(this);
             String folder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-                    ? "Películas/CDG Browser"
-                    : "almacenamiento de la app / Películas";
+                    ? "Descargas/CDG Browser"
+                    : "almacenamiento de la app / Descargas";
             destination.setText("Destino: " + folder);
             destination.setTextSize(12);
             destination.setTextColor(colorMuted);
             destination.setPadding(dp(16), dp(12), dp(16), dp(8));
             downloadsList.addView(destination);
+            Button clearHistory = button("Limpiar historial terminado", () -> dialogBuilder()
+                    .setTitle("Limpiar historial")
+                    .setMessage("Se quitarán del historial las descargas terminadas o fallidas, pero no se borrarán los archivos.")
+                    .setNegativeButton("Cancelar", null)
+                    .setPositiveButton("Limpiar", (dialog, which) -> {
+                        downloads.removeIf(entry -> !isDownloadActive(entry));
+                        saveDownloads();
+                        refreshDownloadsDialog();
+                    })
+                    .show());
+            clearHistory.setPadding(dp(16), dp(8), dp(16), dp(8));
+            downloadsList.addView(clearHistory);
             if (downloads.isEmpty()) {
                 TextView empty = new TextView(this);
-                empty.setText("Aún no hay videos descargados.");
+                empty.setText("Aún no hay descargas.");
                 empty.setTextColor(colorText);
                 empty.setPadding(dp(16), dp(16), dp(16), dp(16));
                 downloadsList.addView(empty);
@@ -1171,19 +1586,81 @@ public final class MainActivity extends Activity {
                 item.setTextColor(colorText);
                 item.setPadding(dp(16), dp(12), dp(8), dp(12));
                 row.addView(item, new LinearLayout.LayoutParams(0, -2, 1));
-                if ("yt-dlp".equals(entry.engine) && entry.processId != null) {
+                if (isDownloadActive(entry) && entry.processId != null) {
                     row.addView(button("Cancelar", () -> {
-                        if (ytDlpEngine.cancel(entry.processId)) {
-                            entry.status = "Cancelando yt-dlp…";
+                        boolean cancelled;
+                        if ("direct".equals(entry.engine) || entry.copying) {
+                            cancelled = videoDownloadManager.cancel(entry.processId);
+                            if (!cancelled) {
+                                entry.status = "No se pudo cancelar la descarga.";
+                            }
                         } else {
-                            entry.status = "No se pudo cancelar yt-dlp.";
+                            cancelled = ytDlpEngine.cancel(entry.processId);
+                            entry.status = cancelled
+                                    ? "Cancelando yt-dlp…" : "No se pudo cancelar yt-dlp.";
                         }
+                        persistDownloadIfDue(entry, true);
+                        refreshDownloadsDialog();
+                    }));
+                } else if (!isDownloadActive(entry)
+                        && !entry.status.startsWith("Completada")
+                        && entry.url != null && !entry.url.isEmpty()) {
+                    row.addView(button("Reintentar", () -> inspectWithYtDlp(entry.url)));
+                }
+                if (entry.status.startsWith("Completada") && entry.location != null) {
+                    row.addView(button("Abrir", () -> openDownloadedFile(entry, false)));
+                    row.addView(button("Compartir", () -> openDownloadedFile(entry, true)));
+                }
+                if (!isDownloadActive(entry)) {
+                    row.addView(button("Quitar", () -> {
+                        downloads.remove(entry);
+                        saveDownloads();
                         refreshDownloadsDialog();
                     }));
                 }
                 downloadsList.addView(row);
             }
         });
+    }
+
+    private void openDownloadedFile(DownloadEntry entry, boolean share) {
+        if (entry.location == null || entry.location.isEmpty()) {
+            Toast.makeText(this, "No se encontró la ubicación del archivo.", Toast.LENGTH_SHORT)
+                    .show();
+            return;
+        }
+        try {
+            Uri uri;
+            if (entry.location.startsWith("content://")) {
+                uri = Uri.parse(entry.location);
+            } else {
+                File file = new File(entry.location);
+                if (!file.isFile()) {
+                    Toast.makeText(this, "El archivo ya no está disponible.", Toast.LENGTH_SHORT)
+                            .show();
+                    return;
+                }
+                uri = FileProvider.getUriForFile(
+                        this, getPackageName() + ".fileprovider", file);
+            }
+            String mimeType = entry.mimeType == null ? "*/*" : entry.mimeType;
+            Intent intent;
+            if (share) {
+                intent = new Intent(Intent.ACTION_SEND)
+                        .setType(mimeType)
+                        .putExtra(Intent.EXTRA_STREAM, uri);
+            } else {
+                intent = new Intent(Intent.ACTION_VIEW).setDataAndType(uri, mimeType);
+            }
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(share ? Intent.createChooser(intent, "Compartir descarga") : intent);
+        } catch (ActivityNotFoundException exception) {
+            Toast.makeText(this, "No hay una aplicación compatible instalada.",
+                    Toast.LENGTH_SHORT).show();
+        } catch (IllegalArgumentException | SecurityException exception) {
+            Toast.makeText(this, "No se pudo abrir o compartir el archivo: "
+                    + exception.getMessage(), Toast.LENGTH_LONG).show();
+        }
     }
 
     private void showHistory() {
@@ -1347,15 +1824,28 @@ public final class MainActivity extends Activity {
         String savedDownloads = preferences.getString(DOWNLOADS_KEY, "[]");
         try {
             JSONArray items = new JSONArray(savedDownloads);
+            long now = System.currentTimeMillis();
             for (int i = 0; i < items.length(); i++) {
                 JSONObject saved = items.getJSONObject(i);
                 DownloadEntry entry = new DownloadEntry();
                 entry.name = saved.getString("name");
                 entry.mimeType = saved.optString("mimeType", "video/*");
                 entry.location = saved.optString("location", "");
-                entry.status = "Completada";
+                entry.url = saved.optString("url", "");
+                entry.engine = saved.optString("engine", "");
+                entry.formatSelector = saved.optString("formatSelector", "");
+                entry.audioOnly = saved.optBoolean("audioOnly", false);
+                entry.includeSubtitles = saved.optBoolean("includeSubtitles", false);
+                entry.status = saved.optString("status", "Completada");
                 entry.bytes = saved.optLong("bytes", 0);
+                entry.lastPersistAt = now;
+                if (isDownloadActive(entry)) {
+                    entry.status = "Interrumpida · puedes reintentar";
+                }
                 downloads.add(entry);
+            }
+            if (!downloads.isEmpty()) {
+                saveDownloads();
             }
         } catch (Exception exception) {
             Toast.makeText(this, "No se pudo leer el historial de descargas",
@@ -1381,17 +1871,26 @@ public final class MainActivity extends Activity {
     }
 
     private void saveDownloads() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread(this::saveDownloads);
+            return;
+        }
         JSONArray items = new JSONArray();
-        for (DownloadEntry entry : downloads) {
-            if (!entry.status.startsWith("Completada")) {
-                continue;
-            }
+        int last = Math.min(100, downloads.size());
+        for (int index = 0; index < last; index++) {
+            DownloadEntry entry = downloads.get(index);
             JSONObject item = new JSONObject();
             try {
                 item.put("name", entry.name);
                 item.put("mimeType", entry.mimeType);
                 item.put("location", entry.location);
                 item.put("bytes", entry.bytes);
+                item.put("url", entry.url);
+                item.put("engine", entry.engine);
+                item.put("formatSelector", entry.formatSelector);
+                item.put("audioOnly", entry.audioOnly);
+                item.put("includeSubtitles", entry.includeSubtitles);
+                item.put("status", entry.status);
                 items.put(item);
             } catch (org.json.JSONException exception) {
                 runOnUiThread(() -> Toast.makeText(this,
