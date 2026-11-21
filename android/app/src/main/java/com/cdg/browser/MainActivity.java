@@ -78,6 +78,8 @@ import java.util.ArrayDeque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.net.HttpURLConnection;
@@ -101,6 +103,8 @@ public final class MainActivity extends Activity {
     private static final String HOME_PAGE_KEY = "home_page";
     private static final String BLOCK_POPUPS_KEY = "block_popups";
     private static final String BLOCK_CLICK_REDIRECTS_KEY = "block_click_redirects";
+    private static final String MEDIA_FAB_ENABLED_KEY = "media_fab_enabled";
+    private static final String MEDIA_FAB_HIDDEN_SITES_KEY = "media_fab_hidden_sites";
     private static final int REQUEST_DOWNLOAD_FOLDER = 4701;
     private static final String THEME_KEY = "dark_theme";
     private static final int MAX_HISTORY_ITEMS = 50;
@@ -170,14 +174,22 @@ public final class MainActivity extends Activity {
     private Button sidebarUpdateButton;
     private Button sidebarImageBatchButton;
     private Button sidebarVideoBatchButton;
+    private Button sidebarMediaLibraryButton;
+    private Button mediaFabSiteButton;
     private int openSidebar;
     private final List<AdBlockEngine.PageImageCandidate> pageImageCandidates =
             new ArrayList<>();
     private String pageImagePageUrl = "";
     private String pageImagePageTitle = "";
     private final ArrayDeque<DetectedMedia> bulkVideoQueue = new ArrayDeque<>();
+    private final List<DetectedMedia> bulkVideoAnalysisQueue = new ArrayList<>();
+    private final Set<String> mediaFabHiddenSites = new HashSet<>();
     private boolean privateMode;
     private boolean bulkVideoBatchRunning;
+    private int bulkVideoActiveDownloads;
+    private int bulkVideoAnalysisIndex;
+    private int bulkVideoMaximumHeight;
+    private boolean mediaFabEnabled = true;
     private boolean darkTheme;
     private boolean addressBarVisible = true;
     private boolean addressAutoHide = true;
@@ -747,9 +759,13 @@ public final class MainActivity extends Activity {
         sidebarImageBatchButton.setEnabled(false);
         content.addView(sidebarImageBatchButton, settingButtonParams());
         sidebarVideoBatchButton = button(
-                "Videos detectados · " + currentPageDetectedVideos().size(),
+                "Descargar varios videos · " + allDetectedVideos().size(),
                 this::showBulkVideoPicker);
         content.addView(sidebarVideoBatchButton, settingButtonParams());
+        sidebarMediaLibraryButton = button(
+                "Biblioteca multimedia · " + allDetectedVideos().size(),
+                this::showDetectedMedia);
+        content.addView(sidebarMediaLibraryButton, settingButtonParams());
         addSidebarSection(content, "ADBLOCKER");
         rightAdBlockSummary = new TextView(this);
         rightAdBlockSummary.setTextColor(colorMuted);
@@ -923,44 +939,166 @@ public final class MainActivity extends Activity {
                     Toast.LENGTH_SHORT).show();
             return;
         }
-        List<DetectedMedia> candidates = currentPageDetectedVideos();
+        List<DetectedMedia> candidates = allDetectedVideos();
         if (candidates.isEmpty()) {
-            Toast.makeText(this, "Aún no se han detectado videos en esta página.",
+            Toast.makeText(this, "Aún no se han acumulado videos detectados.",
                     Toast.LENGTH_SHORT).show();
             return;
         }
         if (candidates.size() > MAX_BULK_ITEMS) {
             candidates = new ArrayList<>(candidates.subList(0, MAX_BULK_ITEMS));
         }
-        String[] labels = new String[candidates.size()];
-        boolean[] selected = new boolean[candidates.size()];
-        for (int index = 0; index < candidates.size(); index++) {
-            DetectedMedia media = candidates.get(index);
-            labels[index] = media.title + (media.videoHeight > 0
-                    ? " · " + media.videoHeight + "p" : "");
-            selected[index] = true;
+        List<DetectedMedia> selectedCandidates = candidates;
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(8), dp(4), dp(8), dp(4));
+        TextView instructions = new TextView(this);
+        instructions.setText("Selecciona videos acumulados de las páginas visitadas. "
+                + "yt-dlp analizará metadatos antes de descargar.");
+        instructions.setTextColor(colorMuted);
+        instructions.setPadding(dp(8), dp(4), dp(8), dp(8));
+        content.addView(instructions);
+        LinearLayout selectionActions = new LinearLayout(this);
+        Button selectAll = button("Todos", () -> { });
+        Button selectNone = button("Ninguno", () -> { });
+        selectionActions.addView(selectAll, new LinearLayout.LayoutParams(0,
+                dp(44), 1));
+        selectionActions.addView(selectNone, new LinearLayout.LayoutParams(0,
+                dp(44), 1));
+        content.addView(selectionActions);
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout choices = new LinearLayout(this);
+        choices.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(choices);
+        List<CheckBox> checkBoxes = new ArrayList<>();
+        for (DetectedMedia media : candidates) {
+            CheckBox checkBox = new CheckBox(this);
+            String title = titleForDownload(media.title, media.pageTitle);
+            String resolution = media.videoHeight > 0
+                    ? media.videoHeight + "p" : "calidad pendiente";
+            String duration = media.durationText == null || media.durationText.isEmpty()
+                    ? "" : " · " + media.durationText;
+            checkBox.setText(title + " · " + resolution + duration);
+            checkBox.setTextColor(colorText);
+            checkBox.setChecked(true);
+            checkBox.setPadding(dp(8), dp(4), dp(8), dp(4));
+            choices.addView(checkBox);
+            checkBoxes.add(checkBox);
         }
-        List<DetectedMedia> selectable = candidates;
-        dialogBuilder()
-                .setTitle("Videos detectados · hasta " + MAX_BULK_ITEMS)
-                .setMessage("Se analizarán y descargarán en secuencia con yt-dlp. "
-                        + "No se accede a contenido DRM ni se evitan controles de acceso.")
-                .setMultiChoiceItems(labels, selected,
-                        (dialog, which, checked) -> selected[which] = checked)
+        content.addView(scroll, new LinearLayout.LayoutParams(-1, dp(320)));
+        AlertDialog picker = dialogBuilder()
+                .setTitle("Videos acumulados · hasta " + MAX_BULK_ITEMS)
+                .setView(content)
                 .setNegativeButton("Cancelar", null)
-                .setPositiveButton("Descargar seleccionados", (dialog, which) -> {
-                    bulkVideoQueue.clear();
-                    for (int index = 0; index < selected.length; index++) {
-                        if (selected[index]) {
-                            bulkVideoQueue.addLast(selectable.get(index));
+                .setPositiveButton("Analizar selección", null)
+                .create();
+        selectAll.setOnClickListener(view -> {
+            for (CheckBox checkBox : checkBoxes) {
+                checkBox.setChecked(true);
+            }
+        });
+        selectNone.setOnClickListener(view -> {
+            for (CheckBox checkBox : checkBoxes) {
+                checkBox.setChecked(false);
+            }
+        });
+        picker.setOnShowListener(dialog -> picker.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(view -> {
+                    bulkVideoAnalysisQueue.clear();
+                    for (int index = 0; index < checkBoxes.size(); index++) {
+                        if (checkBoxes.get(index).isChecked()) {
+                            bulkVideoAnalysisQueue.add(selectedCandidates.get(index));
                         }
                     }
-                    if (bulkVideoQueue.isEmpty()) {
+                    if (bulkVideoAnalysisQueue.isEmpty()) {
                         Toast.makeText(this, "Selecciona al menos un video.",
                                 Toast.LENGTH_SHORT).show();
                         return;
                     }
+                    picker.dismiss();
+                    bulkVideoAnalysisIndex = 0;
+                    analyzeNextBulkVideo();
+                }));
+        picker.show();
+    }
+
+    private void analyzeNextBulkVideo() {
+        if (bulkVideoAnalysisIndex >= bulkVideoAnalysisQueue.size()) {
+            showBulkVideoReview();
+            return;
+        }
+        DetectedMedia media = bulkVideoAnalysisQueue.get(bulkVideoAnalysisIndex++);
+        setDetectedMediaStatus(media, "Analizando metadatos…", true);
+        inspectWithYtDlp(media.url, media, () -> {
+            if (isFinishing()) {
+                return;
+            }
+            analyzeNextBulkVideo();
+        });
+    }
+
+    private void showBulkVideoReview() {
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(8), dp(4), dp(8), dp(4));
+        TextView info = new TextView(this);
+        info.setText("Revisa metadatos y miniaturas. La cola admite hasta 3 descargas simultáneas.");
+        info.setTextColor(colorMuted);
+        info.setPadding(dp(8), dp(4), dp(8), dp(8));
+        content.addView(info);
+        Button qualityButton = button(bulkVideoQualityLabel(), () -> { });
+        qualityButton.setOnClickListener(
+                view -> showBulkVideoQualityPicker(qualityButton));
+        content.addView(qualityButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(list);
+        for (DetectedMedia item : bulkVideoAnalysisQueue) {
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(8), dp(8), dp(8), dp(8));
+            ImageView thumbnail = new ImageView(this);
+            thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            thumbnail.setBackground(rippleBackground(colorBackground, colorBorder, 8));
+            row.addView(thumbnail, new LinearLayout.LayoutParams(dp(96), dp(54)));
+            if (item.thumbnailUrl != null) {
+                loadThumbnail(thumbnail, item.thumbnailUrl);
+            } else {
+                thumbnail.setImageResource(android.R.drawable.ic_media_play);
+            }
+            TextView details = new TextView(this);
+            String resolution = highestVideoQuality(item);
+            String duration = item.durationText == null || item.durationText.isEmpty()
+                    ? "Duración no disponible" : item.durationText;
+            String title = titleForDownload(item.title, item.pageTitle);
+            String qualities = availableVideoQualities(item);
+            String sourceHost = Uri.parse(item.pageUrl).getHost();
+            details.setText(title + "\n" + resolution + " · " + duration
+                    + "\nCalidades: " + qualities
+                    + "\n" + (sourceHost == null ? item.type : sourceHost)
+                    + " · " + item.formats.size() + " formatos"
+                    + (item.formats.isEmpty() ? " · automática" : ""));
+            details.setTextColor(colorText);
+            details.setTextSize(13);
+            details.setMaxLines(3);
+            details.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            details.setPadding(dp(10), 0, 0, 0);
+            row.addView(details, new LinearLayout.LayoutParams(0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+            list.addView(row);
+        }
+        content.addView(scroll, new LinearLayout.LayoutParams(-1, dp(320)));
+        dialogBuilder()
+                .setTitle("Revisar selección · " + bulkVideoAnalysisQueue.size())
+                .setView(content)
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Descargar seleccionados", (dialog, which) -> {
+                    bulkVideoQueue.clear();
+                    bulkVideoQueue.addAll(bulkVideoAnalysisQueue);
                     bulkVideoBatchRunning = true;
+                    bulkVideoActiveDownloads = 0;
                     if (sidebarVideoBatchButton != null) {
                         sidebarVideoBatchButton.setEnabled(false);
                     }
@@ -969,24 +1107,106 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
+    private String highestVideoQuality(DetectedMedia item) {
+        int height = item.videoHeight;
+        for (YtDlpFormatOption format : item.formats) {
+            if (!format.getAudioOnly()) {
+                height = Math.max(height, format.getHeight());
+            }
+        }
+        return height > 0 ? height + "p" : "Resolución no disponible";
+    }
+
+    private String availableVideoQualities(DetectedMedia item) {
+        List<Integer> heights = new ArrayList<>();
+        for (YtDlpFormatOption format : item.formats) {
+            if (!format.getAudioOnly() && format.getHeight() > 0
+                    && !heights.contains(format.getHeight())) {
+                heights.add(format.getHeight());
+            }
+            if (heights.size() == 5) {
+                break;
+            }
+        }
+        if (heights.isEmpty()) {
+            return item.videoHeight > 0 ? item.videoHeight + "p" : "no disponibles";
+        }
+        List<String> labels = new ArrayList<>();
+        for (Integer height : heights) {
+            labels.add(height + "p");
+        }
+        return String.join(", ", labels);
+    }
+
+    private String bulkVideoQualityLabel() {
+        return bulkVideoMaximumHeight == 0 ? "Calidad del lote · máxima disponible"
+                : "Calidad del lote · hasta " + bulkVideoMaximumHeight + "p";
+    }
+
+    private void showBulkVideoQualityPicker(Button qualityButton) {
+        String[] labels = {"Máxima disponible", "Hasta 1080p", "Hasta 720p"};
+        int[] heights = {0, 1080, 720};
+        int selected = bulkVideoMaximumHeight == 1080 ? 1
+                : bulkVideoMaximumHeight == 720 ? 2 : 0;
+        dialogBuilder()
+                .setTitle("Calidad para el lote")
+                .setSingleChoiceItems(labels, selected, (dialog, which) -> {
+                    bulkVideoMaximumHeight = heights[which];
+                    qualityButton.setText(bulkVideoQualityLabel());
+                    dialog.dismiss();
+                })
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    private String bulkVideoFormatSelector(DetectedMedia item) {
+        YtDlpFormatOption selected = null;
+        for (YtDlpFormatOption format : item.formats) {
+            if (format.getAudioOnly()) {
+                continue;
+            }
+            if (bulkVideoMaximumHeight == 0) {
+                return format.getSelector();
+            }
+            if (format.getHeight() > 0 && format.getHeight() <= bulkVideoMaximumHeight
+                    && (selected == null || format.getHeight() > selected.getHeight())) {
+                selected = format;
+            }
+        }
+        if (selected != null) {
+            return selected.getSelector();
+        }
+        return bulkVideoMaximumHeight == 0 ? "bestvideo+bestaudio/best"
+                : "bestvideo[height<=" + bulkVideoMaximumHeight
+                        + "]+bestaudio/best[height<=" + bulkVideoMaximumHeight + "]";
+    }
+
     private void downloadNextBulkVideo() {
-        DetectedMedia media = bulkVideoQueue.pollFirst();
-        if (media == null) {
+        while (bulkVideoBatchRunning && bulkVideoActiveDownloads < 3
+                && !bulkVideoQueue.isEmpty()) {
+            DetectedMedia media = bulkVideoQueue.pollFirst();
+            bulkVideoActiveDownloads++;
+            startYtDlpDownload(
+                    media.url,
+                    titleForDownload(media.title, media.pageTitle),
+                    bulkVideoFormatSelector(media),
+                    false,
+                    subtitlesByDefault,
+                    media,
+                    () -> {
+                        bulkVideoActiveDownloads = Math.max(0, bulkVideoActiveDownloads - 1);
+                        downloadNextBulkVideo();
+                    });
+        }
+        if (bulkVideoBatchRunning && bulkVideoQueue.isEmpty()
+                        && bulkVideoActiveDownloads == 0) {
             bulkVideoBatchRunning = false;
+            bulkVideoAnalysisQueue.clear();
             if (sidebarVideoBatchButton != null) {
                 sidebarVideoBatchButton.setEnabled(true);
             }
             Toast.makeText(this, "La cola de videos terminó.", Toast.LENGTH_LONG).show();
-            return;
         }
-        startYtDlpDownload(
-                media.url,
-                titleForDownload(media.title, media.pageTitle),
-                "bestvideo+bestaudio/best",
-                false,
-                subtitlesByDefault,
-                media,
-                this::downloadNextBulkVideo);
     }
 
     private Switch sidebarSwitch(String label, boolean checked) {
@@ -1429,6 +1649,7 @@ public final class MainActivity extends Activity {
                             updateTabCount();
                             updateFavoriteButton();
                             updateDetectedMediaButton();
+                            updateMediaFabSiteButton();
                         }
                     });
                 }
@@ -1502,6 +1723,7 @@ public final class MainActivity extends Activity {
         updatePrivateButton();
         updateDetectedMediaButton();
         updateBulkVideoButton();
+        updateMediaFabSiteButton();
         updateTabCount();
     }
 
@@ -1656,6 +1878,10 @@ public final class MainActivity extends Activity {
             return;
         }
         String currentHost = Uri.parse(currentUrl).getHost();
+        if (!mediaFabEnabled || isMediaFabHiddenForHost(currentHost)) {
+            mediaFab.setVisibility(View.GONE);
+            return;
+        }
         int count = 0;
         if (currentHost != null) {
             for (DetectedMedia item : detectedMedia.values()) {
@@ -1667,6 +1893,51 @@ public final class MainActivity extends Activity {
         }
         mediaFab.setText("Medios · " + count);
         mediaFab.setVisibility(count > 0 ? View.VISIBLE : View.GONE);
+    }
+
+    private boolean isMediaFabHiddenForHost(String host) {
+        if (host == null) {
+            return false;
+        }
+        String normalizedHost = host.toLowerCase(Locale.ROOT);
+        for (String hiddenHost : mediaFabHiddenSites) {
+            if (normalizedHost.equals(hiddenHost)
+                    || normalizedHost.endsWith("." + hiddenHost)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void toggleCurrentSiteMediaFabVisibility() {
+        String host = Uri.parse(currentUrl).getHost();
+        if (host == null) {
+            Toast.makeText(this, "La página actual no tiene un sitio válido.",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        host = host.toLowerCase(Locale.ROOT);
+        if (!mediaFabHiddenSites.remove(host)) {
+            mediaFabHiddenSites.add(host);
+        }
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+                .putStringSet(MEDIA_FAB_HIDDEN_SITES_KEY, new HashSet<>(mediaFabHiddenSites))
+                .apply();
+        updateMediaFabSiteButton();
+        updateDetectedMediaButton();
+    }
+
+    private void updateMediaFabSiteButton() {
+        if (mediaFabSiteButton == null) {
+            return;
+        }
+        String host = Uri.parse(currentUrl).getHost();
+        boolean hidden = isMediaFabHiddenForHost(host);
+        mediaFabSiteButton.setText(host == null
+                ? "Botón flotante: sitio no válido"
+                : (hidden ? "Mostrar botón en " : "Ocultar botón en ")
+                        + host.toLowerCase(Locale.ROOT));
+        mediaFabSiteButton.setEnabled(host != null);
     }
 
     private void updatePageImageCandidates(
@@ -1742,18 +2013,23 @@ public final class MainActivity extends Activity {
     private void updateBulkVideoButton() {
         if (sidebarVideoBatchButton != null) {
             sidebarVideoBatchButton.setText(
-                    "Videos detectados · " + currentPageDetectedVideos().size());
+                    "Descargar varios videos · " + allDetectedVideos().size());
+        }
+        if (sidebarMediaLibraryButton != null) {
+            sidebarMediaLibraryButton.setText(
+                    "Biblioteca multimedia · " + allDetectedVideos().size());
         }
     }
 
-    private List<DetectedMedia> currentPageDetectedVideos() {
-        List<DetectedMedia> currentPage = new ArrayList<>();
+    private List<DetectedMedia> allDetectedVideos() {
+        List<DetectedMedia> videos = new ArrayList<>();
         for (DetectedMedia item : detectedMedia.values()) {
-            if (isCurrentPage(item.pageUrl)) {
-                currentPage.add(item);
+            if ("Video".equals(item.type) || "HLS".equals(item.type)
+                    || "DASH".equals(item.type)) {
+                videos.add(item);
             }
         }
-        return currentPage;
+        return videos;
     }
 
     private void showDetectedMedia() {
@@ -2497,8 +2773,19 @@ public final class MainActivity extends Activity {
     }
 
     private void inspectWithYtDlp(String url, DetectedMedia source) {
+        inspectWithYtDlp(url, source, () -> { });
+    }
+
+    private void inspectWithYtDlp(
+            String url, DetectedMedia source, Runnable onFinished) {
         boolean[] cancelled = {false};
         String[] analysisProcessId = {null};
+        AtomicBoolean analysisFinished = new AtomicBoolean();
+        Runnable finishAnalysis = () -> {
+            if (analysisFinished.compareAndSet(false, true)) {
+                mainHandler.post(onFinished);
+            }
+        };
         final AlertDialog loading;
         if (source == null) {
             loading = dialogBuilder()
@@ -2554,6 +2841,7 @@ public final class MainActivity extends Activity {
                     setDetectedMediaStatus(
                             source, "Listo · elige una calidad en esta tarjeta.", false);
                     renderDetectedMediaItems();
+                    finishAnalysis.run();
                     return;
                 }
                 String duration = info.getDurationSeconds() > 0
@@ -2572,6 +2860,7 @@ public final class MainActivity extends Activity {
                         .setPositiveButton("Elegir calidad", (dialog, which) ->
                                 selectYtDlpQuality(url, info, source))
                         .show();
+                finishAnalysis.run();
             }
 
             @Override
@@ -2586,6 +2875,7 @@ public final class MainActivity extends Activity {
                 } else if (!cancelled[0] && !isFinishing()) {
                     showYtDlpError("No hay un extractor compatible para esta dirección.");
                 }
+                finishAnalysis.run();
             }
 
             @Override
@@ -2601,6 +2891,7 @@ public final class MainActivity extends Activity {
                 if (!cancelled[0] && source == null && !isFinishing()) {
                     showYtDlpError(message);
                 }
+                finishAnalysis.run();
             }
         };
         Runnable startExtraction = () -> {
@@ -2628,6 +2919,7 @@ public final class MainActivity extends Activity {
                 if (!cancelled[0] && source == null && !isFinishing()) {
                     showYtDlpError(message);
                 }
+                finishAnalysis.run();
             }
         });
     }
@@ -3566,6 +3858,27 @@ public final class MainActivity extends Activity {
 
         TextView mediaHeading = settingsSection("Descargas multimedia");
         content.addView(mediaHeading);
+        Switch mediaFabSwitch = new Switch(this);
+        mediaFabSwitch.setText("Mostrar botón flotante de medios");
+        mediaFabSwitch.setTextColor(colorText);
+        mediaFabSwitch.setChecked(mediaFabEnabled);
+        mediaFabSwitch.setOnCheckedChangeListener((view, checked) -> {
+            mediaFabEnabled = checked;
+            getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+                    .putBoolean(MEDIA_FAB_ENABLED_KEY, checked)
+                    .apply();
+            updateDetectedMediaButton();
+        });
+        content.addView(mediaFabSwitch);
+        TextView mediaFabHint = new TextView(this);
+        mediaFabHint.setText("Ocultar el botón no apaga el detector: los enlaces siguen "
+                + "acumulándose en la biblioteca multimedia del panel lateral.");
+        mediaFabHint.setTextSize(12);
+        mediaFabHint.setTextColor(colorMuted);
+        content.addView(mediaFabHint);
+        mediaFabSiteButton = button("", this::toggleCurrentSiteMediaFabVisibility);
+        content.addView(mediaFabSiteButton, settingButtonParams());
+        updateMediaFabSiteButton();
         Button[] qualityButtonRef = new Button[1];
         qualityButtonRef[0] = button(
                 minimumMediaHeight + "p o superior · Cambiar", () -> {
@@ -3888,6 +4201,14 @@ public final class MainActivity extends Activity {
         blockClickRedirects = preferences.getBoolean(BLOCK_CLICK_REDIRECTS_KEY, true);
         addressAutoHide = !isTvVersion()
                 && preferences.getBoolean(ADDRESS_AUTO_HIDE_KEY, true);
+        mediaFabEnabled = preferences.getBoolean(MEDIA_FAB_ENABLED_KEY, true);
+        mediaFabHiddenSites.clear();
+        for (String host : preferences.getStringSet(
+                MEDIA_FAB_HIDDEN_SITES_KEY, new HashSet<>())) {
+            if (host != null && !host.isBlank()) {
+                mediaFabHiddenSites.add(host.toLowerCase(Locale.ROOT));
+            }
+        }
         minimumMediaHeight = preferences.getInt(MINIMUM_MEDIA_HEIGHT_KEY, 1080);
         if (!isSupportedMediaHeight(minimumMediaHeight)) {
             minimumMediaHeight = 1080;
