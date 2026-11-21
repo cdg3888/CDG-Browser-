@@ -8,18 +8,18 @@ Requiere JDK 17 o posterior y Android SDK con plataforma 37.2 y Build Tools 37.0
 
 ```sh
 cd android
-./gradlew :app:assembleMobileDebug :app:assembleTvDebug
+./gradlew :app:assembleMobileRelease :app:assembleTvRelease
 ```
 
-Se generan APK separadas para `arm64-v8a` y `armeabi-v7a` en `android/app/build/outputs/apk/`. La variante `mobile` conserva el identificador `com.cdg.browser`; `tv` usa `com.cdg.browser.tv`, incluye entrada Android TV/Leanback y una interfaz con controles grandes y foco para navegación con mando. Se pueden instalar ambas variantes a la vez. Para compilar solo una, usa `:app:assembleMobileDebug` o `:app:assembleTvDebug`.
+Se genera un APK universal por variante, con bibliotecas para `arm64-v8a`, `armeabi-v7a` y `x86_64`, en `android/app/build/outputs/apk/mobile/release/app-mobile-release-unsigned.apk` y `android/app/build/outputs/apk/tv/release/app-tv-release-unsigned.apk`. Los APK Release no están firmados porque el proyecto no configura una clave de publicación; hay que firmarlos antes de instalarlos o distribuirlos. La variante `mobile` conserva el identificador `com.cdg.browser`; `tv` usa `com.cdg.browser.tv`, incluye entrada Android TV/Leanback y una interfaz con controles grandes y foco para navegación con mando. Se pueden instalar ambas variantes a la vez. Para compilar solo una, usa `:app:assembleMobileRelease` o `:app:assembleTvRelease`.
 
-Instala en un dispositivo conectado la APK correspondiente a su arquitectura con:
+Para generar las variantes Debug universales, usa `:app:assembleMobileDebug` y `:app:assembleTvDebug`. Para instalarlas en un dispositivo conectado:
 
 ```sh
-adb install -r android/app/build/outputs/apk/mobile/debug/app-mobile-arm64-v8a-debug.apk
+adb install -r android/app/build/outputs/apk/mobile/debug/app-mobile-debug.apk
 ```
 
-Para instalar la versión de TV en un Android TV ARM64, usa `android/app/build/outputs/apk/tv/debug/app-tv-arm64-v8a-debug.apk`.
+Para instalar la variante Debug de TV en un Android TV, usa `android/app/build/outputs/apk/tv/debug/app-tv-debug.apk`.
 
 La aplicación Android combina la protección estricta de GeckoView con una WebExtension local que filtra solicitudes de terceros usando una lista de hosts incluida en la app. En «Protección» se puede pausar ese filtro, crear una excepción para el sitio actual y actualizar la lista manualmente. La actualización usa [StevenBlack/hosts](https://github.com/StevenBlack/hosts) (licencia MIT), solo tras confirmación; GitHub ve la IP de red, pero no se envían el historial ni la dirección visitada. No hay actualización automática. Las reglas son por host: no eliminan anuncios propios del sitio ni aplican filtros cosméticos, así que no garantizan quitar toda publicidad.
 
