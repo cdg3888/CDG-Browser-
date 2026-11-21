@@ -1,6 +1,6 @@
 {
   "name": "CDG Browser",
-  "description": "Navegador web de alta seguridad con bloqueo avanzado de anuncios, rastreadores, analíticas y popups. Navegación privada y limpia.",
+  "description": "Navegador Android basado en GeckoView con protección estricta contra rastreadores y un filtro local de hosts de terceros. Permite excepciones por sitio y actualización manual de listas, sin sincronización automática; desactiva la telemetría móvil de GeckoView. No elimina necesariamente anuncios propios del sitio ni aplica filtros cosméticos.",
   "requestFramePermissions": [],
   "majorCapabilities": []
 }

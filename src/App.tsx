@@ -1,71 +1,70 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Shield, 
-  ShieldCheck, 
-  ShieldAlert, 
-  Search, 
-  ArrowLeft, 
-  ArrowRight, 
-  RotateCcw, 
-  Lock, 
-  Settings, 
+import { useRef, useState } from 'react';
+import type { FormEvent } from 'react';
+import {
+  ArrowLeft,
+  ArrowRight,
+  ArrowUpRight,
+  Clock3,
+  Globe2,
   History,
-  ExternalLink,
-  Info,
-  X,
+  Home,
+  LockKeyhole,
   Menu,
-  Globe
+  RotateCw,
+  Search,
+  Settings2,
+  ShieldCheck,
+  X,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
+const quickLinks = [
+  { name: 'Google', url: 'https://www.google.com', mark: 'G' },
+  { name: 'DuckDuckGo', url: 'https://duckduckgo.com', mark: 'D' },
+  { name: 'Wikipedia', url: 'https://www.wikipedia.org', mark: 'W' },
+  { name: 'GitHub', url: 'https://github.com', mark: '⌘' },
+];
+
 export default function App() {
-  const [url, setUrl] = useState('https://www.google.com');
-  const [inputUrl, setInputUrl] = useState('https://www.google.com');
+  const [url, setUrl] = useState('https://duckduckgo.com');
+  const [inputUrl, setInputUrl] = useState('');
   const [history, setHistory] = useState<string[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [showProtection, setShowProtection] = useState(false);
   const [isHome, setIsHome] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
-  useEffect(() => {
-    handleNavigate('https://www.google.com');
-  }, []);
-
-  const handleNavigate = (targetUrl?: string) => {
-    let target = (targetUrl || inputUrl).trim();
+  const handleNavigate = (targetUrl = inputUrl) => {
+    let target = targetUrl.trim();
     if (!target) return;
-    
-    // Check if it looks like a URL
-    const isUrl = /^(https?:\/\/)?([\da-z.-]+)\.([a-z.]{2,6})([\/\w .-]*)*\/?$/.test(target);
-    
-    if (!target.startsWith('http')) {
-      if (isUrl) {
-        target = 'https://' + target;
-      } else {
-        target = `https://duckduckgo.com/?q=${encodeURIComponent(target)}`;
-      }
+
+    const looksLikeHost = /^(localhost|[\da-z-]+(?:\.[\da-z-]+)+)(?::\d+)?(?:[/?#][^\s]*)?$/i.test(target);
+    if (!/^https?:\/\//i.test(target)) {
+      target = looksLikeHost
+        ? `https://${target}`
+        : `https://duckduckgo.com/?q=${encodeURIComponent(target)}`;
     }
-    
-    console.log('Navigating to:', target);
+
+    try {
+      const parsed = new URL(target);
+      if (!['http:', 'https:'].includes(parsed.protocol)) return;
+      target = parsed.href;
+    } catch {
+      return;
+    }
+
     setUrl(target);
     setInputUrl(target);
     setIsLoading(true);
     setIsHome(false);
-    setHistory(prev => {
-      const newHistory = [target, ...prev.filter(h => h !== target)];
-      return newHistory.slice(0, 20);
-    });
+    setHistory((previous) => [target, ...previous.filter((item) => item !== target)].slice(0, 30));
   };
 
   const handleGoHome = () => {
     setIsHome(true);
-    setUrl('Home');
     setInputUrl('');
+    setIsLoading(false);
   };
 
   const handleRefresh = () => {
@@ -75,255 +74,171 @@ export default function App() {
     }
   };
 
-  const handleIframeLoad = () => {
-    setIsLoading(false);
+  const handleSearch = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    handleNavigate();
   };
 
-  const quickLinks = [
-    { name: 'Google', url: 'https://www.google.com' },
-    { name: 'DuckDuckGo', url: 'https://duckduckgo.com' },
-    { name: 'Wikipedia', url: 'https://www.wikipedia.org' },
-    { name: 'GitHub', url: 'https://github.com' },
-  ];
-
   return (
-    <div className="flex flex-col h-screen bg-[#E4E3E0] text-[#141414] font-sans overflow-hidden">
-      {/* Browser Header */}
-      <header className="flex flex-col border-b border-[#141414] bg-white z-20">
-        {/* Top Bar: Tabs & Controls */}
-        <div className="flex items-center px-4 py-2 gap-4 border-b border-[#141414]/10">
-          <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full bg-red-400" />
-            <div className="w-3 h-3 rounded-full bg-yellow-400" />
-            <div className="w-3 h-3 rounded-full bg-green-400" />
+    <div className="browser-shell">
+      <header className="browser-header">
+        <div className="browser-topline">
+          <button className="brand-lockup" onClick={handleGoHome} aria-label="Ir al inicio">
+            <span className="brand-mark"><ShieldCheck size={18} strokeWidth={2.2} /></span>
+            <span className="brand-name">cdg<span>.</span></span>
+          </button>
+          <div className="tab-pill">
+            <Globe2 size={14} />
+            <span>{isHome ? 'Nueva pestaña' : new URL(url).hostname.replace(/^www\./, '')}</span>
+            {!isHome && <button className="tab-close" onClick={handleGoHome} aria-label="Cerrar pestaña"><X size={13} /></button>}
           </div>
-          
-          <div className="flex-1 flex items-center gap-2">
-            <div 
-              onClick={handleGoHome}
-              className={`px-4 py-1.5 border border-[#141414] border-b-0 rounded-t-lg text-xs font-medium flex items-center gap-2 max-w-[200px] truncate cursor-pointer transition-colors ${
-                isHome ? 'bg-white' : 'bg-[#E4E3E0] hover:bg-white/50'
-              }`}
-            >
-              <Globe size={12} />
-              {isHome ? 'CDG Home' : url.replace('https://', '').replace('www.', '')}
-              {!isHome && <X size={10} className="ml-2 cursor-pointer hover:text-red-500" onClick={(e) => { e.stopPropagation(); handleGoHome(); }} />}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-4">
-            <Menu size={18} className="cursor-pointer opacity-60 hover:opacity-100" />
-          </div>
+          <button className="icon-button top-menu" onClick={() => setShowProtection(true)} aria-label="Información del navegador">
+            <Menu size={18} />
+          </button>
         </div>
 
-        {/* Navigation Bar */}
-        <div className="flex items-center px-4 py-2 gap-4">
-          <div className="flex items-center gap-2">
-            <button onClick={handleGoHome} className="p-1.5 hover:bg-gray-100 rounded-md transition-colors">
-              <ArrowLeft size={18} className={history.length > 1 ? 'opacity-100' : 'opacity-30'} />
-            </button>
-            <button className="p-1.5 hover:bg-gray-100 rounded-md transition-colors opacity-30 cursor-not-allowed">
-              <ArrowRight size={18} />
-            </button>
-            <button onClick={handleRefresh} className="p-1.5 hover:bg-gray-100 rounded-md transition-colors">
-              <RotateCcw size={18} className={isLoading ? 'animate-spin' : ''} />
-            </button>
+        <div className="browser-toolbar">
+          <div className="toolbar-navigation">
+            <button className="icon-button" onClick={handleGoHome} aria-label="Volver al inicio"><ArrowLeft size={18} /></button>
+            <button className="icon-button" onClick={handleGoHome} aria-label="Inicio"><Home size={17} /></button>
+            <button className="icon-button" onClick={handleRefresh} aria-label="Recargar"><RotateCw size={17} className={isLoading ? 'spin' : ''} /></button>
           </div>
 
-          <div className="flex-1 relative group">
-            <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-              <Lock size={14} />
-            </div>
-            <input 
-              type="text" 
+          <form className="address-bar" onSubmit={handleSearch}>
+            <LockKeyhole size={15} className="address-lock" />
+            <input
               value={inputUrl}
-              onChange={(e) => setInputUrl(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleNavigate()}
-              className="w-full bg-gray-100 border border-transparent focus:border-[#141414] focus:bg-white rounded-lg py-2 pl-10 pr-4 text-sm transition-all outline-none"
-              placeholder="Enter URL or search..."
+              onChange={(event) => setInputUrl(event.target.value)}
+              placeholder="Buscar o escribir una dirección"
+              aria-label="Buscar o escribir una dirección"
+              spellCheck={false}
             />
-            <button 
-              onClick={() => handleNavigate()}
-              className="absolute right-10 top-1/2 -translate-y-1/2 p-1 hover:bg-gray-200 rounded transition-colors"
-              title="Navigate"
-            >
-              <Search size={16} />
-            </button>
-            <a 
-              href={url} 
-              target="_blank" 
-              rel="noopener noreferrer"
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-gray-200 rounded transition-colors text-gray-400 hover:text-[#141414]"
-              title="Open Direct (No Proxy)"
-            >
-              <ExternalLink size={16} />
-            </a>
-          </div>
+            <button className="address-submit" type="submit" aria-label="Buscar"><Search size={17} /></button>
+          </form>
 
-          <div className="flex items-center gap-2">
-            <button onClick={() => setShowHistory(!showHistory)} className={`p-1.5 rounded-md transition-colors ${showHistory ? 'bg-gray-200' : 'hover:bg-gray-100'}`}>
+          <div className="toolbar-actions">
+            <button className={`icon-button ${showHistory ? 'is-selected' : ''}`} onClick={() => setShowHistory((visible) => !visible)} aria-label="Historial">
               <History size={18} />
             </button>
-            <button className="p-1.5 hover:bg-gray-100 rounded-md transition-colors">
-              <Settings size={18} />
+            <button className="icon-button" onClick={() => setShowProtection(true)} aria-label="Ajustes de privacidad">
+              <Settings2 size={18} />
             </button>
+            {!isHome && (
+              <a className="icon-button" href={url} target="_blank" rel="noopener noreferrer" aria-label="Abrir en otra pestaña">
+                <ArrowUpRight size={18} />
+              </a>
+            )}
           </div>
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="flex-1 relative flex">
-        {/* Iframe Container or Home Page */}
-        <div className="flex-1 bg-white relative">
-          {isHome ? (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#E4E3E0] p-8">
-              <motion.div 
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="max-w-2xl w-full text-center space-y-12"
-              >
-                <div className="space-y-4">
-                  <div className="flex justify-center">
-                    <div className="p-6 bg-white border-2 border-[#141414] rounded-3xl shadow-[8px_8px_0px_0px_rgba(20,20,20,1)]">
-                      <ShieldCheck size={64} className="text-[#141414]" />
-                    </div>
-                  </div>
-                  <h1 className="text-6xl font-serif italic font-bold tracking-tight">CDG Browser</h1>
-                  <p className="text-sm font-mono uppercase tracking-[0.2em] opacity-60">Secure • Private • Fast</p>
-                </div>
+      <main className="browser-main">
+        {isHome ? (
+          <motion.section
+            className="home-content"
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.35 }}
+          >
+            <div className="hero">
+              <span className="eyebrow"><span className="status-dot" /> Tu espacio para navegar</span>
+              <h1>La web, a tu ritmo.</h1>
+              <p>Un navegador sencillo, privado y pensado para que lo importante sea el contenido.</p>
+            </div>
 
-                <div className="relative max-w-lg mx-auto">
-                  <input 
-                    type="text" 
-                    value={inputUrl}
-                    onChange={(e) => setInputUrl(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleNavigate()}
-                    className="w-full bg-white border-2 border-[#141414] rounded-2xl py-4 px-6 text-lg shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] outline-none focus:translate-x-[2px] focus:translate-y-[2px] focus:shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] transition-all"
-                    placeholder="Search the web privately..."
-                  />
-                  <button 
-                    onClick={() => handleNavigate()}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 bg-[#141414] text-white p-2 rounded-xl hover:scale-105 transition-transform"
-                  >
-                    <ArrowRight size={24} />
+            <form className="home-search" onSubmit={handleSearch}>
+              <Search size={19} />
+              <input
+                value={inputUrl}
+                onChange={(event) => setInputUrl(event.target.value)}
+                placeholder="Busca algo o escribe una dirección"
+                aria-label="Busca algo o escribe una dirección"
+              />
+              <button type="submit" aria-label="Buscar"><ArrowRight size={18} /></button>
+            </form>
+
+            <section className="quick-section" aria-label="Accesos rápidos">
+              <div className="section-heading">
+                <h2>Accesos rápidos</h2>
+                <span>PARA EMPEZAR</span>
+              </div>
+              <div className="quick-grid">
+                {quickLinks.map((link) => (
+                  <button className="quick-card" key={link.name} onClick={() => handleNavigate(link.url)}>
+                    <span className={`quick-mark mark-${link.name.toLowerCase()}`}>{link.mark}</span>
+                    <span className="quick-copy"><strong>{link.name}</strong><small>{new URL(link.url).hostname}</small></span>
+                    <ArrowUpRight size={15} className="quick-arrow" />
                   </button>
-                </div>
+                ))}
+              </div>
+            </section>
 
-                <div className="flex flex-wrap justify-center gap-4">
-                  {quickLinks.map((link, i) => (
-                    <button 
-                      key={i}
-                      onClick={() => handleNavigate(link.url)}
-                      className="px-6 py-2 bg-white border border-[#141414]/10 rounded-full text-sm hover:border-[#141414] hover:bg-[#141414] hover:text-white transition-all"
-                    >
-                      {link.name}
+            <div className="privacy-note">
+              <span className="privacy-icon"><ShieldCheck size={19} /></span>
+              <div><strong>Protección integrada</strong><p>El navegador Android usa la protección contra rastreadores de GeckoView.</p></div>
+              <button onClick={() => setShowProtection(true)} aria-label="Más información"><ArrowRight size={17} /></button>
+            </div>
+          </motion.section>
+        ) : (
+          <div className="page-frame">
+            {isLoading && <div className="loading-indicator"><span /><span /><span /></div>}
+            <iframe
+              ref={iframeRef}
+              src={url}
+              className="browser-frame"
+              onLoad={() => setIsLoading(false)}
+              title="Contenido web"
+            />
+          </div>
+        )}
+
+        <AnimatePresence>
+          {showHistory && (
+            <motion.aside
+              className="history-panel"
+              initial={{ opacity: 0, x: 18 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 18 }}
+            >
+              <div className="panel-heading">
+                <div><span className="eyebrow">TU ACTIVIDAD</span><h2>Historial</h2></div>
+                <button className="icon-button" onClick={() => setShowHistory(false)} aria-label="Cerrar historial"><X size={18} /></button>
+              </div>
+              {history.length === 0 ? (
+                <div className="empty-history"><Clock3 size={22} /><p>Aún no hay páginas visitadas.</p></div>
+              ) : (
+                <div className="history-list">
+                  {history.map((item) => (
+                    <button key={item} className="history-item" onClick={() => { handleNavigate(item); setShowHistory(false); }}>
+                      <Globe2 size={16} /><span>{new URL(item).hostname}<small>{item}</small></span>
                     </button>
                   ))}
                 </div>
-
-                  <div className="pt-12 grid grid-cols-2 gap-8 text-left">
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider">
-                        <Shield size={14} />
-                        Security
-                      </div>
-                      <p className="text-[11px] opacity-60 leading-relaxed">Modern web standards for a safe browsing experience.</p>
-                    </div>
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider">
-                        <Lock size={14} />
-                        Privacy
-                      </div>
-                      <p className="text-[11px] opacity-60 leading-relaxed">Direct connection to your favorite websites.</p>
-                    </div>
-                  </div>
-              </motion.div>
-            </div>
-          ) : (
-            <div className="relative flex-1 bg-white overflow-hidden">
-              {isLoading && (
-                <div className="absolute inset-0 z-20 bg-white/80 backdrop-blur-sm flex items-center justify-center">
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="w-12 h-12 border-4 border-[#141414] border-t-transparent rounded-full animate-spin" />
-                    <p className="font-mono text-xs uppercase tracking-widest animate-pulse">Loading Content...</p>
-                  </div>
-                </div>
               )}
-              <iframe 
-                ref={iframeRef}
-                src={url}
-                className="w-full h-full border-none"
-                onLoad={handleIframeLoad}
-                title="Browser Content"
-              />
-            </div>
-          )}
-        </div>
-
-        {/* History Panel */}
-        <AnimatePresence>
-          {showHistory && (
-            <motion.aside 
-              initial={{ x: '-100%' }}
-              animate={{ x: 0 }}
-              exit={{ x: '-100%' }}
-              className="absolute left-0 top-0 bottom-0 w-72 bg-white border-r border-[#141414] z-30 shadow-2xl p-6 overflow-y-auto"
-            >
-              <div className="flex items-center justify-between mb-8">
-                <h2 className="font-serif italic text-xl">History</h2>
-                <button onClick={() => setShowHistory(false)} className="p-1 hover:bg-gray-100 rounded">
-                  <X size={20} />
-                </button>
-              </div>
-              <div className="space-y-2">
-                {history.length === 0 ? (
-                  <p className="text-xs opacity-40 italic">No history yet.</p>
-                ) : (
-                  history.map((item, i) => (
-                    <button 
-                      key={i}
-                      onClick={() => { handleNavigate(item); setShowHistory(false); }}
-                      className="w-full text-left p-3 hover:bg-gray-50 rounded-lg border border-transparent hover:border-[#141414]/10 transition-all group"
-                    >
-                      <p className="text-xs font-medium truncate mb-1">{item}</p>
-                      <div className="flex items-center gap-2 text-[10px] opacity-40 group-hover:opacity-100 transition-opacity">
-                        <Globe size={10} />
-                        <span>{new URL(item).hostname}</span>
-                      </div>
-                    </button>
-                  ))
-                )}
-              </div>
             </motion.aside>
           )}
         </AnimatePresence>
       </main>
 
-      {/* Footer / Status Bar */}
-      <footer className="bg-white border-t border-[#141414] px-4 py-1.5 flex items-center justify-between text-[10px] font-mono uppercase tracking-wider opacity-60">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-1">
-            <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
-            <span>Browser Active</span>
-          </div>
-          <span>TLS 1.3 Active</span>
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span>Quick Access:</span>
-            {quickLinks.map((link, i) => (
-              <button 
-                key={i}
-                onClick={() => handleNavigate(link.url)}
-                className="hover:text-[#141414] hover:underline"
-              >
-                {link.name}
-              </button>
-            ))}
-          </div>
-          <span>v1.0.4-STABLE</span>
-        </div>
+      <footer className="browser-status">
+        <span><span className="status-dot" /> CDG Browser</span>
+        <span className="status-caption">Vista web · demostración</span>
       </footer>
+
+      <AnimatePresence>
+        {showProtection && (
+          <motion.div className="modal-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowProtection(false)}>
+            <motion.section className="protection-card" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }} onClick={(event) => event.stopPropagation()}>
+              <button className="icon-button modal-close" onClick={() => setShowProtection(false)} aria-label="Cerrar"><X size={18} /></button>
+              <span className="privacy-icon"><ShieldCheck size={21} /></span>
+              <span className="eyebrow">PRIVACIDAD</span>
+              <h2>Protección integrada</h2>
+              <p>La aplicación Android configura la protección de rastreo de GeckoView, incluida la categoría de anuncios. Esta vista web es una demostración y no puede filtrar el contenido cargado dentro de sitios de terceros.</p>
+              <button className="modal-confirm" onClick={() => setShowProtection(false)}>Entendido</button>
+            </motion.section>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

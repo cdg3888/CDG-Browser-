@@ -1,0 +1,28 @@
+{
+  "manifest_version": 2,
+  "name": "CDG Local Content Blocker",
+  "version": "1.0.0",
+  "description": "Blocks third-party ad and tracker hosts using local rules.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "cdg-adblock@cdg.browser"
+    }
+  },
+  "background": {
+    "scripts": [
+      "filter-rules.js",
+      "filters.js",
+      "background.js"
+    ],
+    "persistent": true
+  },
+  "permissions": [
+    "geckoViewAddons",
+    "nativeMessaging",
+    "webRequest",
+    "webRequestBlocking",
+    "storage",
+    "unlimitedStorage",
+    "<all_urls>"
+  ]
+}
