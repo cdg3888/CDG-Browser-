@@ -2,6 +2,7 @@
   const FILTER_LIST_URL = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts";
   const MIN_UPDATED_DOMAINS = 50000;
   const MAX_FILTER_BYTES = 5 * 1024 * 1024;
+  const FILTER_FETCH_TIMEOUT_MS = 30_000;
   const NATIVE_APP = "com.cdg.browser";
   const DEFAULT_DOMAINS = new Set(
     globalThis.CDG_DEFAULT_FILTERS
@@ -16,6 +17,7 @@
   let filtersLoaded = false;
   let allowedSites = new Set();
   let blockedCount = 0;
+  const blockedByDomain = new Map();
   let lastUpdated = null;
   let updateInProgress = false;
   let nativePort = null;
@@ -34,6 +36,10 @@
       enabled,
       configured,
       blockedCount,
+      blockedByDomain: Array.from(blockedByDomain.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([domain, count]) => ({ domain, count })),
       ruleCount: blockedDomains.size,
       lastUpdated,
       updateInProgress,
@@ -61,12 +67,17 @@
     return false;
   }
 
-  function reportMedia(details, contentType) {
+  function reportMedia(details, contentType, isPlaying = false) {
     const pageUrl = details.documentUrl || details.originUrl || details.initiator;
+    const urlType = CDGMediaSniffer.classify(details.url);
+    const responseType = CDGMediaSniffer.classifyContentType(contentType);
     const mediaType = details.incognito === true
       ? null
-      : CDGMediaSniffer.classify(details.url)
-        || CDGMediaSniffer.classifyContentType(contentType);
+      : responseType || urlType;
+    if (mediaType === "Video" && !isPlaying
+        && details.type !== "media" && responseType !== "Video") {
+      return;
+    }
     if (mediaType && pageUrl) {
       const key = `${pageUrl}\n${details.url}`;
       if (!reportedMedia.has(key)) {
@@ -84,6 +95,24 @@
     }
   }
 
+  browser.runtime.onMessage.addListener((message, sender) => {
+    if (!message || message.type !== "page-media-detected"
+        || sender.tab?.incognito === true) {
+      return;
+    }
+    const url = typeof message.url === "string" ? message.url : "";
+    const pageUrl = sender.url || sender.tab?.url;
+    const mediaType = CDGMediaSniffer.classify(url);
+    if (mediaType === "Video" && pageUrl && getHost(pageUrl)) {
+      reportMedia({
+        url,
+        documentUrl: pageUrl,
+        type: "media",
+        incognito: sender.tab?.incognito === true
+      }, null, true);
+    }
+  });
+
   function handleRequest(details) {
     const requestHost = getHost(details.url);
     const pageHost = getHost(details.documentUrl || details.originUrl || details.initiator);
@@ -96,6 +125,7 @@
       && CDGFilterRules.matches(requestHost, blockedDomains);
     if (shouldBlock) {
       blockedCount += 1;
+      blockedByDomain.set(requestHost, (blockedByDomain.get(requestHost) || 0) + 1);
       if (blockedCount === 1 || blockedCount % 25 === 0) {
         publishState();
       }
@@ -154,11 +184,14 @@
     }
     updateInProgress = true;
     publishState("update-started");
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FILTER_FETCH_TIMEOUT_MS);
     try {
       const response = await fetch(FILTER_LIST_URL, {
         cache: "no-store",
         credentials: "omit",
-        referrerPolicy: "no-referrer"
+        referrerPolicy: "no-referrer",
+        signal: controller.signal
       });
       if (!response.ok) {
         throw new Error(`El servidor respondió con HTTP ${response.status}.`);
@@ -193,10 +226,12 @@
       publishState("update-complete", "Lista actualizada.");
     } catch (error) {
       updateInProgress = false;
-      const message = error instanceof Error
-        ? error.message
-        : "No se pudo actualizar la lista.";
+      const message = error?.name === "AbortError"
+        ? "La actualización de filtros superó el tiempo máximo."
+        : error instanceof Error ? error.message : "No se pudo actualizar la lista.";
       publishState("update-error", message);
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 

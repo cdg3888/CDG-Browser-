@@ -12,8 +12,10 @@ import org.mozilla.geckoview.GeckoRuntimeSettings;
 import org.mozilla.geckoview.WebExtension;
 
 import java.util.HashSet;
+import java.util.ArrayList;
 import java.util.Locale;
 import java.util.Set;
+import java.util.List;
 
 final class AdBlockEngine {
     interface Listener {
@@ -37,6 +39,7 @@ final class AdBlockEngine {
     private final GeckoRuntime runtime;
     private final SharedPreferences preferences;
     private final Set<String> allowedSites = new HashSet<>();
+    private final List<String> blockedDomainSummary = new ArrayList<>();
 
     private Listener listener;
     private WebExtension extension;
@@ -170,6 +173,7 @@ final class AdBlockEngine {
             case "state":
                 blockedCount = Math.max(0, data.optInt("blockedCount", blockedCount));
                 ruleCount = Math.max(0, data.optInt("ruleCount", ruleCount));
+                updateBlockedDomainSummary(data.optJSONArray("blockedByDomain"));
                 lastUpdated = data.optString("lastUpdated", lastUpdated);
                 updateInProgress = data.optBoolean("updateInProgress", false);
                 configured = data.optBoolean("configured", configured);
@@ -186,6 +190,7 @@ final class AdBlockEngine {
                 lastError = "";
                 blockedCount = Math.max(0, data.optInt("blockedCount", blockedCount));
                 ruleCount = Math.max(0, data.optInt("ruleCount", ruleCount));
+                updateBlockedDomainSummary(data.optJSONArray("blockedByDomain"));
                 lastUpdated = data.optString("lastUpdated", lastUpdated);
                 notifyStateChanged();
                 break;
@@ -303,6 +308,10 @@ final class AdBlockEngine {
         return blockedCount;
     }
 
+    String getBlockedDomainSummary() {
+        return String.join(", ", blockedDomainSummary);
+    }
+
     int getRuleCount() {
         return ruleCount;
     }
@@ -328,6 +337,24 @@ final class AdBlockEngine {
         notifyStateChanged();
         if (listener != null) {
             listener.onError(message);
+        }
+    }
+
+    private void updateBlockedDomainSummary(JSONArray domains) {
+        if (domains == null) {
+            return;
+        }
+        blockedDomainSummary.clear();
+        for (int index = 0; index < domains.length() && index < 8; index++) {
+            JSONObject item = domains.optJSONObject(index);
+            if (item == null) {
+                continue;
+            }
+            String domain = normalizeDomain(item.optString("domain", ""));
+            int count = item.optInt("count", 0);
+            if (domain != null && count > 0) {
+                blockedDomainSummary.add(domain + " (" + count + ")");
+            }
         }
     }
 

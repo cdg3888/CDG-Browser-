@@ -17,6 +17,14 @@
     ],
     "persistent": true
   },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["media-sniffer.js", "page-media.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
   "permissions": [
     "geckoViewAddons",
     "nativeMessaging",

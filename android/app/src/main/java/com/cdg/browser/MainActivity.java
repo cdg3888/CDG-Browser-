@@ -49,7 +49,13 @@ import org.mozilla.geckoview.GeckoView;
 import org.mozilla.geckoview.WebResponse;
 import androidx.core.content.FileProvider;
 import com.cdg.browser.downloads.VideoDownloadManager;
+import com.cdg.browser.ytdlp.ChainExtractor;
+import com.cdg.browser.ytdlp.DirectMediaExtractor;
+import com.cdg.browser.ytdlp.MediaExtractor;
+import com.cdg.browser.ytdlp.YtDlpFormatOption;
 import com.cdg.browser.ytdlp.YtDlpEngine;
+import com.cdg.browser.ytdlp.YtDlpMediaInfo;
+import com.cdg.browser.ytdlp.YtDlpUniversalExtractor;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -92,6 +98,7 @@ public final class MainActivity extends Activity {
     private static AdBlockEngine adBlockEngine;
     private VideoDownloadManager videoDownloadManager;
     private YtDlpEngine ytDlpEngine;
+    private ChainExtractor mediaExtractor;
     private BrowserTab activeTab;
     private EditText addressField;
     private TextView statusView;
@@ -132,6 +139,11 @@ public final class MainActivity extends Activity {
         String url = HOME_URL;
         String title = "Nueva pestaña";
         boolean privateMode;
+        String pendingPopupUrl;
+        boolean pendingPopupHasGesture;
+        String lastRedirectUrl;
+        long redirectWindowStartedAt;
+        int redirectCount;
     }
 
     private static final class DownloadEntry {
@@ -181,6 +193,10 @@ public final class MainActivity extends Activity {
         createRuntime();
         videoDownloadManager = new VideoDownloadManager(this);
         ytDlpEngine = new YtDlpEngine(this);
+        mediaExtractor = new ChainExtractor(
+                new DirectMediaExtractor(),
+                new ArrayList<>(),
+                new YtDlpUniversalExtractor(ytDlpEngine));
         activateTab(createSession());
         if (adBlockEngine == null) {
             adBlockEngine = new AdBlockEngine(this, runtime, null);
@@ -437,25 +453,65 @@ public final class MainActivity extends Activity {
             public GeckoResult<AllowOrDeny> onLoadRequest(
                     GeckoSession currentSession,
                     GeckoSession.NavigationDelegate.LoadRequest request) {
-                String scheme = Uri.parse(request.uri).getScheme();
-                if ("https".equalsIgnoreCase(scheme)
-                        || "http".equalsIgnoreCase(scheme)
-                        || ("about".equalsIgnoreCase(scheme)
-                        && "about:blank".equalsIgnoreCase(request.uri))) {
-                    return GeckoResult.fromValue(AllowOrDeny.ALLOW);
+                if (!isSafeNavigationUri(request.uri)) {
+                    runOnUiThread(() -> Toast.makeText(MainActivity.this,
+                            "Por seguridad, solo se permiten páginas HTTP y HTTPS",
+                            Toast.LENGTH_SHORT).show());
+                    return GeckoResult.fromValue(AllowOrDeny.DENY);
                 }
-                runOnUiThread(() -> Toast.makeText(MainActivity.this,
-                        "Por seguridad, solo se permiten páginas HTTP y HTTPS",
-                        Toast.LENGTH_SHORT).show());
-                return GeckoResult.fromValue(AllowOrDeny.DENY);
+                if (request.target == GeckoSession.NavigationDelegate.TARGET_WINDOW_NEW) {
+                    if (request.hasUserGesture) {
+                        tab.pendingPopupUrl = request.uri;
+                        tab.pendingPopupHasGesture = true;
+                    } else if (request.isRedirect && tab.pendingPopupHasGesture) {
+                        tab.pendingPopupUrl = request.uri;
+                    } else {
+                        tab.pendingPopupUrl = null;
+                        tab.pendingPopupHasGesture = false;
+                        return GeckoResult.fromValue(AllowOrDeny.DENY);
+                    }
+                }
+                if (request.isRedirect) {
+                    long now = System.currentTimeMillis();
+                    if (now - tab.redirectWindowStartedAt > 15_000L) {
+                        tab.redirectWindowStartedAt = now;
+                        tab.redirectCount = 0;
+                        tab.lastRedirectUrl = null;
+                    }
+                    tab.redirectCount++;
+                    if (tab.redirectCount > 15 || request.uri.equals(tab.lastRedirectUrl)) {
+                        tab.pendingPopupUrl = null;
+                        tab.pendingPopupHasGesture = false;
+                        runOnUiThread(() -> Toast.makeText(MainActivity.this,
+                                "Se detuvo una cadena de redirecciones repetidas.",
+                                Toast.LENGTH_LONG).show());
+                        return GeckoResult.fromValue(AllowOrDeny.DENY);
+                    }
+                    tab.lastRedirectUrl = request.uri;
+                } else {
+                    tab.redirectCount = 0;
+                    tab.redirectWindowStartedAt = 0;
+                    tab.lastRedirectUrl = null;
+                }
+                return GeckoResult.fromValue(AllowOrDeny.ALLOW);
             }
 
             @Override
             public GeckoResult<GeckoSession> onNewSession(GeckoSession currentSession, String uri) {
+                boolean allowed = tab.pendingPopupHasGesture
+                        && uri != null && uri.equals(tab.pendingPopupUrl)
+                        && isSafeNavigationUri(uri);
+                tab.pendingPopupUrl = null;
+                tab.pendingPopupHasGesture = false;
+                if (!allowed) {
+                    return null;
+                }
+                BrowserTab popupTab = createSession();
+                popupTab.url = uri;
                 runOnUiThread(() -> Toast.makeText(MainActivity.this,
-                        "Usa + Pestaña para abrir otra pestaña",
-                        Toast.LENGTH_SHORT).show());
-                return null;
+                        "Se abrió una pestaña nueva. Comprueba el dominio antes de iniciar sesión.",
+                        Toast.LENGTH_LONG).show());
+                return GeckoResult.fromValue(popupTab.session);
             }
 
             @Override
@@ -470,7 +526,7 @@ public final class MainActivity extends Activity {
                     GeckoSession currentSession, String url,
                     List<GeckoSession.PermissionDelegate.ContentPermission> permissions,
                     Boolean hasUserGesture) {
-                if (url == null || !(url.startsWith("https://") || url.startsWith("http://"))) {
+                if (!isSafeNavigationUri(url) || "about:blank".equalsIgnoreCase(url)) {
                     return;
                 }
                 tab.url = url;
@@ -879,10 +935,25 @@ public final class MainActivity extends Activity {
     }
 
     private boolean isHttpUrl(String value) {
-        Uri uri = Uri.parse(value);
-        String scheme = uri.getScheme();
-        return uri.getHost() != null
-                && ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));
+        return isSafeNavigationUri(value) && !"about:blank".equalsIgnoreCase(value);
+    }
+
+    private boolean isSafeNavigationUri(String value) {
+        if (value == null || value.length() > 8192) {
+            return false;
+        }
+        if ("about:blank".equalsIgnoreCase(value)) {
+            return true;
+        }
+        try {
+            java.net.URI uri = new java.net.URI(value);
+            String scheme = uri.getScheme();
+            return uri.getHost() != null && uri.getUserInfo() == null
+                    && uri.getPort() <= 65535
+                    && ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));
+        } catch (java.net.URISyntaxException exception) {
+            return false;
+        }
     }
 
     private void toggleAddressBar() {
@@ -928,6 +999,11 @@ public final class MainActivity extends Activity {
     }
 
     private void navigate(String url) {
+        if (!isHttpUrl(url)) {
+            Toast.makeText(this, "Introduce una dirección HTTP o HTTPS válida.",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
         currentUrl = url;
         if (activeTab != null) {
             activeTab.url = url;
@@ -1200,11 +1276,15 @@ public final class MainActivity extends Activity {
 
     private void inspectWithYtDlp(String url, DetectedMedia source) {
         boolean[] cancelled = {false};
+        String[] analysisProcessId = {null};
         AlertDialog loading = dialogBuilder()
                 .setTitle("Preparando yt-dlp")
-                .setMessage("La primera inicialización puede tardar un poco.")
+                .setMessage("Analizando los formatos disponibles…")
                 .setNegativeButton("Cerrar", (dialog, which) -> {
                     cancelled[0] = true;
+                    if (analysisProcessId[0] != null) {
+                        ytDlpEngine.cancelInfo(analysisProcessId[0]);
+                    }
                     if (source != null) {
                         setDetectedMediaStatus(source, "Análisis cancelado.", false);
                     }
@@ -1212,53 +1292,81 @@ public final class MainActivity extends Activity {
                 .create();
         loading.setOnCancelListener(dialog -> {
             cancelled[0] = true;
+            if (analysisProcessId[0] != null) {
+                ytDlpEngine.cancelInfo(analysisProcessId[0]);
+            }
             if (source != null) {
                 setDetectedMediaStatus(source, "Análisis cancelado.", false);
             }
         });
         loading.show();
+        MediaExtractor.Callback extractionCallback = new MediaExtractor.Callback() {
+            @Override
+            public void onStarted(String processId) {
+                analysisProcessId[0] = processId;
+                if (cancelled[0]) {
+                    ytDlpEngine.cancelInfo(processId);
+                }
+            }
+
+            @Override
+            public void onResult(YtDlpMediaInfo info) {
+                loading.dismiss();
+                if (cancelled[0] || isFinishing()) {
+                    return;
+                }
+                if (source != null) {
+                    setDetectedMediaStatus(
+                            source, "Listo para descargar: " + info.getTitle(), false);
+                }
+                String duration = info.getDurationSeconds() > 0
+                        ? "\nDuración: " + formatDuration(info.getDurationSeconds()) : "";
+                String thumbnail = info.getThumbnailUrl() == null
+                        ? "\nMiniatura: no disponible" : "\nMiniatura: disponible";
+                dialogBuilder()
+                        .setTitle("Descargar video")
+                        .setMessage(info.getTitle() + duration
+                                + "\nFormatos disponibles: " + info.getFormats().size()
+                                + thumbnail
+                                + "\n\nyt-dlp no usa las cookies del navegador. "
+                                + "Solo descarga contenido que tengas derecho a guardar; "
+                                + "no evita DRM ni protecciones de acceso.")
+                        .setNegativeButton("Cancelar", null)
+                        .setPositiveButton("Elegir calidad", (dialog, which) ->
+                                selectYtDlpQuality(url, info, source))
+                        .show();
+            }
+
+            @Override
+            public void onNotHandled() {
+                loading.dismiss();
+                if (!cancelled[0] && !isFinishing()) {
+                    showYtDlpError("No hay un extractor compatible para esta dirección.");
+                }
+            }
+
+            @Override
+            public void onError(String message) {
+                loading.dismiss();
+                if (!cancelled[0] && source != null) {
+                    setDetectedMediaStatus(source, "Error de análisis: " + message, false);
+                }
+                if (!cancelled[0] && !isFinishing()) {
+                    showYtDlpError(message);
+                }
+            }
+        };
+        Runnable startExtraction = () -> {
+            if (cancelled[0]) {
+                return;
+            }
+            String referer = source == null ? null : source.pageUrl;
+            mediaExtractor.extract(url, referer, extractionCallback);
+        };
         ytDlpEngine.initialize(new YtDlpEngine.ResultCallback() {
             @Override
             public void onReady() {
-                if (cancelled[0]) {
-                    return;
-                }
-                ytDlpEngine.getInfo(url, new YtDlpEngine.InfoCallback() {
-                    @Override
-                    public void onInfo(String title, int durationSeconds) {
-                        loading.dismiss();
-                        if (cancelled[0] || isFinishing()) {
-                            return;
-                        }
-                        if (source != null) {
-                            setDetectedMediaStatus(source, "Listo para descargar: " + title, false);
-                        }
-                        String duration = durationSeconds > 0
-                                ? "\nDuración: " + formatDuration(durationSeconds)
-                                : "";
-                        dialogBuilder()
-                                .setTitle("Descargar video")
-                                .setMessage(title + duration
-                                        + "\n\nyt-dlp no usa las cookies del navegador. "
-                                        + "Solo descarga contenido que tengas derecho a guardar; "
-                                        + "no evita DRM ni protecciones de acceso.")
-                                .setNegativeButton("Cancelar", null)
-                                .setPositiveButton("Elegir calidad", (dialog, which) ->
-                                        selectYtDlpQuality(url, title, source))
-                                .show();
-                    }
-
-                    @Override
-                    public void onError(String message) {
-                        loading.dismiss();
-                        if (!cancelled[0] && source != null) {
-                            setDetectedMediaStatus(source, "Error de análisis: " + message, false);
-                        }
-                        if (!cancelled[0] && !isFinishing()) {
-                            showYtDlpError(message);
-                        }
-                    }
-                });
+                startExtraction.run();
             }
 
             @Override
@@ -1274,14 +1382,7 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void selectYtDlpQuality(String url, String title, DetectedMedia source) {
-        String[] qualities = {"Mejor disponible", "Hasta 1080p", "Hasta 720p", "Hasta 480p"};
-        String[] formats = {
-                "bestvideo*+bestaudio/best",
-                "bestvideo*[height<=1080]+bestaudio/best[height<=1080]/best",
-                "bestvideo*[height<=720]+bestaudio/best[height<=720]/best",
-                "bestvideo*[height<=480]+bestaudio/best[height<=480]/best"
-        };
+    private void selectYtDlpQuality(String url, YtDlpMediaInfo media, DetectedMedia source) {
         LinearLayout options = new LinearLayout(this);
         options.setOrientation(LinearLayout.VERTICAL);
         CheckBox includeSubtitles = new CheckBox(this);
@@ -1292,19 +1393,25 @@ public final class MainActivity extends Activity {
                 .setView(options)
                 .setNegativeButton("Cancelar", null)
                 .create();
-        for (int i = 0; i < qualities.length; i++) {
-            final int qualityIndex = i;
-            options.addView(button(qualities[i], () -> {
-                boolean subtitles = includeSubtitles.isChecked();
+        for (YtDlpFormatOption format : media.getFormats()) {
+            Button formatButton = button(
+                    format.getTitle() + "\n" + format.getDetails(), () -> {
                 qualityDialog.dismiss();
-                startYtDlpDownload(
-                        url, title, formats[qualityIndex], false, subtitles, source);
-            }));
+                boolean audioOnly = format.getAudioOnly();
+                startYtDlpDownload(url, media.getTitle(), format.getSelector(), audioOnly,
+                        !audioOnly && includeSubtitles.isChecked(), source);
+            });
+            formatButton.setMaxLines(3);
+            options.addView(formatButton, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         }
-        options.addView(button("Solo audio · MP3", () -> {
+        Button audioButton = button("Solo audio · MP3", () -> {
             qualityDialog.dismiss();
-            startYtDlpDownload(url, title, "bestaudio/best", true, false, source);
-        }));
+            startYtDlpDownload(
+                    url, media.getTitle(), "bestaudio/best", true, false, source);
+        });
+        options.addView(audioButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         qualityDialog.show();
     }
 
@@ -1333,6 +1440,7 @@ public final class MainActivity extends Activity {
         refreshDownloadsDialog();
 
         ytDlpEngine.download(url, temporaryDirectory, formatSelector, audioOnly, includeSubtitles,
+                source == null ? null : source.pageUrl,
                 new YtDlpEngine.DownloadCallback() {
             @Override
             public void onStarted(String processId) {
@@ -1762,11 +1870,14 @@ public final class MainActivity extends Activity {
             String error = adBlockEngine.getLastError().isEmpty()
                     ? ""
                     : "\n\nAviso: " + adBlockEngine.getLastError();
+            String blockedDomains = adBlockEngine.getBlockedDomainSummary();
             protectionSummaryView.setText(
                     "Protección estricta de GeckoView + reglas locales\n"
                             + "Estado: " + engineState
                             + "\nDominios en lista: " + adBlockEngine.getRuleCount()
                             + "\nBloqueos en esta sesión: " + adBlockEngine.getBlockedCount()
+                            + "\nDominios responsables: "
+                            + (blockedDomains.isEmpty() ? "aún no hay bloqueos" : blockedDomains)
                             + "\n" + updated
                             + "\n\nLa telemetría móvil de GeckoView está desactivada. "
                             + "La lista solo se actualiza cuando lo solicitas."
