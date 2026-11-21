@@ -18,6 +18,20 @@ import java.util.Set;
 import java.util.List;
 
 final class AdBlockEngine {
+    static final class PageImageCandidate {
+        final String url;
+        final String label;
+        final int width;
+        final int height;
+
+        PageImageCandidate(String url, String label, int width, int height) {
+            this.url = url;
+            this.label = label;
+            this.width = width;
+            this.height = height;
+        }
+    }
+
     interface Listener {
         void onReady();
 
@@ -36,6 +50,9 @@ final class AdBlockEngine {
                 int durationSeconds);
 
         void onPageScroll(String pageUrl, boolean scrollingDown);
+
+        void onPageImagesDetected(
+                String pageUrl, String pageTitle, List<PageImageCandidate> images);
     }
 
     private static final String EXTENSION_URI =
@@ -246,6 +263,40 @@ final class AdBlockEngine {
                     listener.onPageScroll(scrollPageUrl, "down".equals(direction));
                 }
                 break;
+            case "page-images-detected":
+                String imagePageUrl = data.optString("pageUrl", "");
+                JSONArray imageItems = data.optJSONArray("images");
+                if (listener == null || !isHttpUrl(imagePageUrl) || imageItems == null) {
+                    break;
+                }
+                List<PageImageCandidate> images = new ArrayList<>();
+                for (int index = 0; index < Math.min(imageItems.length(), 200); index++) {
+                    JSONObject image = imageItems.optJSONObject(index);
+                    if (image == null) {
+                        continue;
+                    }
+                    String imageUrl = image.optString("url", "");
+                    if (!isHttpUrl(imageUrl) || imageUrl.length() > 8192) {
+                        continue;
+                    }
+                    String label = image.optString("label", "").trim();
+                    if (label.length() > 120) {
+                        label = label.substring(0, 120);
+                    }
+                    images.add(new PageImageCandidate(
+                            imageUrl,
+                            label,
+                            Math.max(0, Math.min(image.optInt("width", 0), 32768)),
+                            Math.max(0, Math.min(image.optInt("height", 0), 32768))));
+                }
+                if (!images.isEmpty()) {
+                    String imagePageTitle = data.optString("pageTitle", "").trim();
+                    if (imagePageTitle.length() > 200) {
+                        imagePageTitle = imagePageTitle.substring(0, 200);
+                    }
+                    listener.onPageImagesDetected(imagePageUrl, imagePageTitle, images);
+                }
+                break;
             default:
                 reportError("El motor de filtros envió un evento desconocido.");
         }
@@ -447,6 +498,7 @@ final class AdBlockEngine {
             java.net.URI uri = new java.net.URI(value);
             String scheme = uri.getScheme();
             return uri.getHost() != null
+                    && uri.getUserInfo() == null
                     && ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));
         } catch (java.net.URISyntaxException exception) {
             return false;

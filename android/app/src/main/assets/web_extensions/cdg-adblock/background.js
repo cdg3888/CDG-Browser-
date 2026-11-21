@@ -31,6 +31,16 @@
     }
   }
 
+  function isSafeHttpUrl(value) {
+    try {
+      const uri = new URL(value);
+      return (uri.protocol === "http:" || uri.protocol === "https:")
+        && !uri.username && !uri.password && Boolean(uri.hostname);
+    } catch {
+      return false;
+    }
+  }
+
   function publishState(type = "state", message = "") {
     send({
       type,
@@ -124,7 +134,33 @@
   browser.runtime.onMessage.addListener((message, sender) => {
     if (!message || message.type !== "page-media-detected"
         && message.type !== "page-scroll"
+        && message.type !== "page-images-detected"
         || sender.tab?.incognito === true) {
+      return;
+    }
+    if (message.type === "page-images-detected") {
+      const pageUrl = sender.url || sender.tab?.url;
+      if (!pageUrl || !getHost(pageUrl) || !Array.isArray(message.images)) {
+        return;
+      }
+      const images = message.images.slice(0, 200).filter((image) =>
+        image && typeof image.url === "string" && image.url.length <= 8192
+        && isSafeHttpUrl(image.url)
+      ).map((image) => ({
+        url: image.url,
+        label: typeof image.label === "string" ? image.label.slice(0, 120) : "",
+        width: Number.isInteger(image.width) ? Math.min(Math.max(image.width, 0), 32768) : 0,
+        height: Number.isInteger(image.height) ? Math.min(Math.max(image.height, 0), 32768) : 0
+      }));
+      if (images.length) {
+        send({
+          type: "page-images-detected",
+          pageUrl,
+          pageTitle: typeof message.pageTitle === "string"
+            ? message.pageTitle.slice(0, 200) : "",
+          images
+        });
+      }
       return;
     }
     if (message.type === "page-scroll") {

@@ -20,7 +20,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["media-sniffer.js", "page-media.js"],
+      "js": ["media-sniffer.js", "page-media.js", "page-assets.js"],
       "run_at": "document_idle",
       "all_frames": true
     }

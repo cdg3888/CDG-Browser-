@@ -56,6 +56,7 @@ android {
 
 dependencies {
     implementation(project(":downloads"))
+    implementation(project(":media"))
     implementation(project(":ytdlp"))
     implementation("androidx.core:core:1.19.1")
     implementation("org.mozilla.geckoview:geckoview:160.0.20261116130455")

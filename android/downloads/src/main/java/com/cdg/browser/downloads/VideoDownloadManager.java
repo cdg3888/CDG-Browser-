@@ -14,6 +14,10 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.InetAddress;
+import java.net.URI;
+import java.net.URL;
 import java.net.URLDecoder;
 import java.util.ArrayList;
 import java.util.Locale;
@@ -30,6 +34,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class VideoDownloadManager implements AutoCloseable {
+    private static final long MAX_IMAGE_BYTES = 40L * 1024L * 1024L;
+    private static final int MAX_IMAGE_REDIRECTS = 4;
+    private static final int IMAGE_CONNECT_TIMEOUT_MS = 15_000;
+    private static final int IMAGE_READ_TIMEOUT_MS = 30_000;
+
     public interface Listener {
         void onProgress(long bytes);
 
@@ -40,15 +49,17 @@ public final class VideoDownloadManager implements AutoCloseable {
 
     private static final class DownloadTask {
         final String id = UUID.randomUUID().toString();
-        final InputStream input;
+        volatile InputStream input;
         final Listener listener;
         final AtomicBoolean completed = new AtomicBoolean();
         volatile Future<?> future;
         volatile OutputStream output;
         volatile Uri mediaUri;
+        volatile HttpURLConnection connection;
         volatile File localFile;
         volatile boolean customFolder;
         volatile boolean cancelled;
+        long maximumBytes;
 
         DownloadTask(InputStream input, Listener listener) {
             this.input = input;
@@ -160,11 +171,33 @@ public final class VideoDownloadManager implements AutoCloseable {
     }
 
     public static boolean supportsDownloadFile(String filename) {
-        return isVideoFilename(filename) || isAudioFilename(filename);
+        return isVideoFilename(filename) || isAudioFilename(filename)
+                || isImageFilename(filename);
     }
 
     public static String normalizedMediaMimeType(String filename) {
         String lower = filename == null ? "" : filename.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+            return "image/jpeg";
+        }
+        if (lower.endsWith(".png")) {
+            return "image/png";
+        }
+        if (lower.endsWith(".webp")) {
+            return "image/webp";
+        }
+        if (lower.endsWith(".gif")) {
+            return "image/gif";
+        }
+        if (lower.endsWith(".avif")) {
+            return "image/avif";
+        }
+        if (lower.endsWith(".heic") || lower.endsWith(".heif")) {
+            return "image/heic";
+        }
+        if (lower.endsWith(".bmp")) {
+            return "image/bmp";
+        }
         if (lower.endsWith(".mp3")) {
             return "audio/mpeg";
         }
@@ -183,6 +216,112 @@ public final class VideoDownloadManager implements AutoCloseable {
         return normalizedVideoMimeType(null, filename);
     }
 
+    public String downloadImageFromUrl(
+            String imageUrl,
+            String pageUrl,
+            String suggestedFilename,
+            Uri customFolderUri,
+            Listener listener) {
+        Objects.requireNonNull(listener, "listener");
+        URI parsed = parseHttpUri(imageUrl);
+        if (parsed == null) {
+            listener.onError("La dirección de imagen no es una URL pública HTTP o HTTPS válida.");
+            return null;
+        }
+        DownloadTask task = new DownloadTask(null, listener);
+        task.maximumBytes = MAX_IMAGE_BYTES;
+        tasks.put(task.id, task);
+        try {
+            task.future = executor.submit(() ->
+                    fetchAndSaveImage(task, parsed, pageUrl, suggestedFilename, customFolderUri));
+            return task.id;
+        } catch (RejectedExecutionException exception) {
+            tasks.remove(task.id);
+            listener.onError("El gestor de descargas ya está cerrado.");
+            return null;
+        }
+    }
+
+    private void fetchAndSaveImage(
+            DownloadTask task,
+            URI initialUri,
+            String pageUrl,
+            String suggestedFilename,
+            Uri customFolderUri) {
+        URI uri = initialUri;
+        try {
+            HttpURLConnection connection = null;
+            for (int redirect = 0; redirect <= MAX_IMAGE_REDIRECTS; redirect++) {
+                if (task.cancelled || Thread.currentThread().isInterrupted()) {
+                    throw new IOException("Descarga cancelada.");
+                }
+                if (!isPublicHttpUri(uri)) {
+                    throw new IOException("La imagen redirigió a una dirección local o no válida.");
+                }
+                connection = (HttpURLConnection) new URL(uri.toString()).openConnection();
+                task.connection = connection;
+                connection.setConnectTimeout(IMAGE_CONNECT_TIMEOUT_MS);
+                connection.setReadTimeout(IMAGE_READ_TIMEOUT_MS);
+                connection.setInstanceFollowRedirects(false);
+                connection.setRequestProperty("Accept", "image/avif,image/webp,image/*;q=0.9,*/*;q=0.1");
+                if (isPublicHttpUri(parsePublicHttpUri(pageUrl))) {
+                    connection.setRequestProperty("Referer", pageUrl);
+                }
+                int responseCode = connection.getResponseCode();
+                if (responseCode >= 300 && responseCode <= 399) {
+                    String location = connection.getHeaderField("Location");
+                    connection.disconnect();
+                    task.connection = null;
+                    if (redirect == MAX_IMAGE_REDIRECTS || location == null) {
+                        throw new IOException("La imagen redirigió demasiadas veces.");
+                    }
+                    URI next = uri.resolve(location);
+                    if ("https".equalsIgnoreCase(uri.getScheme())
+                            && !"https".equalsIgnoreCase(next.getScheme())) {
+                        throw new IOException("Se rechazó una redirección de HTTPS a HTTP.");
+                    }
+                    uri = next;
+                    continue;
+                }
+                if (responseCode != HttpURLConnection.HTTP_OK) {
+                    throw new IOException("El servidor de imagen respondió HTTP " + responseCode + ".");
+                }
+                String mimeType = mimeTypeForResponse(
+                        java.util.Collections.singletonMap(
+                                "Content-Type", connection.getContentType()));
+                if (!isSupportedImageMime(mimeType)) {
+                    throw new IOException("La URL no devolvió una imagen compatible.");
+                }
+                if ("image/jpg".equalsIgnoreCase(mimeType)) {
+                    mimeType = "image/jpeg";
+                }
+                if (connection.getContentLengthLong() > MAX_IMAGE_BYTES) {
+                    throw new IOException("La imagen excede el tamaño máximo de descarga.");
+                }
+                String filename = withMediaExtension(
+                        sanitizeFilename(suggestedFilename), mimeType);
+                task.input = connection.getInputStream();
+                writeDownload(task, filename, mimeType, customFolderUri);
+                return;
+            }
+            throw new IOException("No se pudo resolver la dirección final de la imagen.");
+        } catch (Exception exception) {
+            String message = task.cancelled ? "Descarga cancelada."
+                    : exception.getMessage() == null ? "Falló la descarga de la imagen."
+                    : exception.getMessage();
+            if (task.completed.compareAndSet(false, true)) {
+                task.listener.onError(message);
+            }
+            tasks.remove(task.id);
+        } finally {
+            HttpURLConnection connection = task.connection;
+            if (connection != null) {
+                connection.disconnect();
+                task.connection = null;
+            }
+        }
+    }
+
     public String download(
             InputStream input,
             String filename,
@@ -199,15 +338,21 @@ public final class VideoDownloadManager implements AutoCloseable {
             Listener listener) {
         Objects.requireNonNull(listener, "listener");
         if (input == null || !(supportsDirectVideo(mimeType, filename)
+                || isSupportedImageMime(mimeType) || isImageFilename(filename)
                 || isAudioMime(mimeType) || isAudioFilename(filename))) {
             closeQuietly(input);
             listener.onError("El formato de descarga no es compatible.");
             return null;
         }
         String safeFilename = withMediaExtension(sanitizeFilename(filename), mimeType);
-        String safeMimeType = isAudioFilename(safeFilename)
-                ? normalizedMediaMimeType(safeFilename)
-                : normalizedVideoMimeType(mimeType, safeFilename);
+        String safeMimeType = isImageFilename(safeFilename) || isSupportedImageMime(mimeType)
+                ? (mimeType != null && isSupportedImageMime(mimeType)
+                        ? ("image/jpg".equalsIgnoreCase(mimeType)
+                                ? "image/jpeg" : mimeType.toLowerCase(Locale.ROOT))
+                        : normalizedMediaMimeType(safeFilename))
+                : isAudioFilename(safeFilename)
+                        ? normalizedMediaMimeType(safeFilename)
+                        : normalizedVideoMimeType(mimeType, safeFilename);
         DownloadTask task = new DownloadTask(input, listener);
         tasks.put(task.id, task);
         try {
@@ -230,6 +375,10 @@ public final class VideoDownloadManager implements AutoCloseable {
         task.cancelled = true;
         closeQuietly(task.input);
         closeQuietly(task.output);
+        HttpURLConnection connection = task.connection;
+        if (connection != null) {
+            connection.disconnect();
+        }
         Future<?> future = task.future;
         if (future != null) {
             future.cancel(true);
@@ -308,6 +457,9 @@ public final class VideoDownloadManager implements AutoCloseable {
                     }
                     destination.write(buffer, 0, count);
                     bytes += count;
+                    if (task.maximumBytes > 0 && bytes > task.maximumBytes) {
+                        throw new IOException("La imagen excede el tamaño máximo de descarga.");
+                    }
                     if (bytes % (512 * 1024) < buffer.length) {
                         task.listener.onProgress(bytes);
                     }
@@ -455,8 +607,140 @@ public final class VideoDownloadManager implements AutoCloseable {
                 || normalized.equals("audio/x-wav");
     }
 
+    private static boolean isImageFilename(String filename) {
+        if (filename == null) {
+            return false;
+        }
+        return filename.toLowerCase(Locale.ROOT)
+                .matches(".*\\.(avif|bmp|gif|heic|heif|jpe?g|png|webp)$");
+    }
+
+    private static boolean isSupportedImageMime(String mimeType) {
+        if (mimeType == null) {
+            return false;
+        }
+        switch (mimeType.toLowerCase(Locale.ROOT)) {
+            case "image/jpeg":
+            case "image/jpg":
+            case "image/png":
+            case "image/webp":
+            case "image/gif":
+            case "image/avif":
+            case "image/bmp":
+            case "image/heic":
+            case "image/heif":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static URI parsePublicHttpUri(String value) {
+        URI uri = parseHttpUri(value);
+        if (uri == null || !isPublicInternetHost(uri.getHost())) {
+            return null;
+        }
+        return uri;
+    }
+
+    private static URI parseHttpUri(String value) {
+        if (value == null || value.length() > 8192) {
+            return null;
+        }
+        try {
+            URI uri = new URI(value);
+            if (uri.getHost() == null || uri.getUserInfo() != null
+                    || !("http".equalsIgnoreCase(uri.getScheme())
+                    || "https".equalsIgnoreCase(uri.getScheme()))
+                    || (uri.getPort() != -1 && (uri.getPort() < 1 || uri.getPort() > 65535))) {
+                return null;
+            }
+            return uri;
+        } catch (Exception exception) {
+            return null;
+        }
+    }
+
+    private static boolean isPublicHttpUri(URI uri) {
+        return uri != null && parsePublicHttpUri(uri.toString()) != null;
+    }
+
+    private static boolean isPublicInternetHost(String host) {
+        String normalized = host.toLowerCase(Locale.ROOT);
+        if (normalized.equals("localhost") || normalized.endsWith(".localhost")
+                || normalized.endsWith(".local") || normalized.endsWith(".internal")) {
+            return false;
+        }
+        try {
+            for (InetAddress address : InetAddress.getAllByName(normalized)) {
+                byte[] bytes = address.getAddress();
+                if (address.isAnyLocalAddress() || address.isLoopbackAddress()
+                        || address.isLinkLocalAddress() || address.isSiteLocalAddress()
+                        || address.isMulticastAddress()
+                        || (bytes.length == 16 && (bytes[0] & 0xfe) == 0xfc)
+                        || isCarrierGradeNatAddress(bytes)) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (IOException exception) {
+            return false;
+        }
+    }
+
+    private static boolean isCarrierGradeNatAddress(byte[] address) {
+        if (address.length != 4) {
+            return false;
+        }
+        int first = address[0] & 0xff;
+        int second = address[1] & 0xff;
+        return first == 100 && second >= 64 && second <= 127;
+    }
+
+    private static String imageExtension(String mimeType) {
+        switch (mimeType.toLowerCase(Locale.ROOT)) {
+            case "image/jpeg":
+            case "image/jpg":
+                return ".jpg";
+            case "image/png":
+                return ".png";
+            case "image/webp":
+                return ".webp";
+            case "image/gif":
+                return ".gif";
+            case "image/avif":
+                return ".avif";
+            case "image/bmp":
+                return ".bmp";
+            case "image/heic":
+            case "image/heif":
+                return ".heic";
+            default:
+                throw new IllegalArgumentException("Tipo de imagen no admitido.");
+        }
+    }
+
     private static String withMediaExtension(String filename, String mimeType) {
         if (isVideoFilename(filename) || isAudioFilename(filename) || mimeType == null) {
+            return filename;
+        }
+        if (isSupportedImageMime(mimeType)) {
+            if (isImageFilename(filename)) {
+                String expectedExtension = imageExtension(mimeType);
+                String lower = filename.toLowerCase(Locale.ROOT);
+                if (lower.endsWith(expectedExtension)
+                        || (("image/jpeg".equalsIgnoreCase(mimeType)
+                        || "image/jpg".equalsIgnoreCase(mimeType))
+                        && lower.endsWith(".jpeg"))) {
+                    return filename;
+                }
+                return filename.replaceFirst(
+                        "(?i)\\.(avif|bmp|gif|heic|heif|jpe?g|png|webp)$", "")
+                        + expectedExtension;
+            }
+            return filename + imageExtension(mimeType);
+        }
+        if (isImageFilename(filename)) {
             return filename;
         }
         if (isAudioMime(mimeType)) {

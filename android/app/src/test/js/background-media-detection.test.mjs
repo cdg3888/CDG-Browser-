@@ -205,6 +205,36 @@ test("forwards top-page scroll events and honors the media detection setting", (
   assert.equal(messages.filter((message) => message.type === "media-detected").length, 0);
 });
 
+test("forwards only bounded HTTP image candidates from normal tabs", () => {
+  const { listeners, messages } = createBackground();
+  const pageUrl = "https://site.example/gallery";
+  listeners.runtimeMessage({
+    type: "page-images-detected",
+    pageTitle: "Gallery",
+    images: [
+      { url: "https://cdn.example/full.jpg", width: 1920, height: 1080 },
+      { url: "data:image/png;base64,abc" },
+      { url: "https://user:pass@cdn.example/private.jpg" }
+    ]
+  }, {
+    url: pageUrl,
+    tab: { url: pageUrl, incognito: false }
+  });
+  listeners.runtimeMessage({
+    type: "page-images-detected",
+    images: [{ url: "https://cdn.example/private.jpg" }]
+  }, {
+    url: "https://private.example/gallery",
+    tab: { url: "https://private.example/gallery", incognito: true }
+  });
+
+  const detected = messages.filter((message) => message.type === "page-images-detected");
+  assert.equal(detected.length, 1);
+  assert.equal(detected[0].pageUrl, pageUrl);
+  assert.equal(detected[0].images.length, 1);
+  assert.equal(detected[0].images[0].url, "https://cdn.example/full.jpg");
+});
+
 test("ignores MP4 URLs requested as images unless the response is video", () => {
   const { listeners, messages } = createBackground();
   const details = {

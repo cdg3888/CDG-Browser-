@@ -16,4 +16,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "CDGBrowser"
-include(":app", ":downloads", ":ytdlp")
+include(":app", ":downloads", ":ytdlp", ":media")

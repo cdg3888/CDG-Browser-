@@ -57,6 +57,9 @@ import org.mozilla.geckoview.GeckoView;
 import org.mozilla.geckoview.WebResponse;
 import androidx.core.content.FileProvider;
 import com.cdg.browser.downloads.VideoDownloadManager;
+import com.cdg.browser.downloads.DownloadHistoryStore;
+import com.cdg.browser.media.MediaGalleryActivity;
+import com.cdg.browser.media.MediaPlayerActivity;
 import com.cdg.browser.ytdlp.ChainExtractor;
 import com.cdg.browser.ytdlp.DirectMediaExtractor;
 import com.cdg.browser.ytdlp.MediaExtractor;
@@ -71,10 +74,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.BufferedInputStream;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import android.content.SharedPreferences;
@@ -99,6 +104,8 @@ public final class MainActivity extends Activity {
     private static final int REQUEST_DOWNLOAD_FOLDER = 4701;
     private static final String THEME_KEY = "dark_theme";
     private static final int MAX_HISTORY_ITEMS = 50;
+    private static final int MAX_BULK_ITEMS = 100;
+    private static final int MAX_PAGE_IMAGE_CANDIDATES = 200;
     private static GeckoRuntime runtime;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -114,6 +121,7 @@ public final class MainActivity extends Activity {
     private final List<BrowserTab> tabs = new ArrayList<>();
     private final List<DownloadEntry> downloads = new ArrayList<>();
     private final LinkedHashMap<String, DetectedMedia> detectedMedia = new LinkedHashMap<>();
+    private final LinkedHashMap<String, PageImageSet> pageImagesByPage = new LinkedHashMap<>();
     private final LinkedHashMap<String, TextView> detectedMediaStatusViews = new LinkedHashMap<>();
     private final LinkedHashMap<String, Button> detectedMediaDownloadButtons = new LinkedHashMap<>();
 
@@ -121,6 +129,7 @@ public final class MainActivity extends Activity {
     private GeckoSession session;
     private static AdBlockEngine adBlockEngine;
     private VideoDownloadManager videoDownloadManager;
+    private DownloadHistoryStore downloadHistoryStore;
     private YtDlpEngine ytDlpEngine;
     private ChainExtractor mediaExtractor;
     private BrowserTab activeTab;
@@ -159,8 +168,16 @@ public final class MainActivity extends Activity {
     private Switch sidebarRedirectSwitch;
     private Button sidebarExceptionButton;
     private Button sidebarUpdateButton;
+    private Button sidebarImageBatchButton;
+    private Button sidebarVideoBatchButton;
     private int openSidebar;
+    private final List<AdBlockEngine.PageImageCandidate> pageImageCandidates =
+            new ArrayList<>();
+    private String pageImagePageUrl = "";
+    private String pageImagePageTitle = "";
+    private final ArrayDeque<DetectedMedia> bulkVideoQueue = new ArrayDeque<>();
     private boolean privateMode;
+    private boolean bulkVideoBatchRunning;
     private boolean darkTheme;
     private boolean addressBarVisible = true;
     private boolean addressAutoHide = true;
@@ -256,6 +273,20 @@ public final class MainActivity extends Activity {
                     ? String.format(
                     Locale.ROOT, "%d:%02d", durationSeconds / 60, durationSeconds % 60) : "";
         }
+
+    }
+
+    private static final class PageImageSet {
+        final String pageUrl;
+        final String title;
+        final List<AdBlockEngine.PageImageCandidate> images;
+
+        PageImageSet(
+                String pageUrl, String title, List<AdBlockEngine.PageImageCandidate> images) {
+            this.pageUrl = pageUrl;
+            this.title = title;
+            this.images = images;
+        }
     }
 
     @Override
@@ -270,6 +301,7 @@ public final class MainActivity extends Activity {
         buildInterface();
         createRuntime();
         videoDownloadManager = new VideoDownloadManager(this);
+        downloadHistoryStore = new DownloadHistoryStore(this);
         ytDlpEngine = new YtDlpEngine(this);
         mediaExtractor = new ChainExtractor(
                 new DirectMediaExtractor(),
@@ -327,6 +359,14 @@ public final class MainActivity extends Activity {
             @Override
             public void onPageScroll(String pageUrl, boolean scrollingDown) {
                 runOnUiThread(() -> handlePageScroll(pageUrl, scrollingDown));
+            }
+
+            @Override
+            public void onPageImagesDetected(
+                    String pageUrl,
+                    String pageTitle,
+                    List<AdBlockEngine.PageImageCandidate> images) {
+                runOnUiThread(() -> updatePageImageCandidates(pageUrl, pageTitle, images));
             }
         });
         adBlockEngine.install();
@@ -701,6 +741,15 @@ public final class MainActivity extends Activity {
             closeSidePanel();
             showSettings();
         }), settingButtonParams());
+        addSidebarSection(content, "DESCARGAS EN LOTE");
+        sidebarImageBatchButton = button(
+                "Imágenes de esta página · 0", this::showBulkImagePicker);
+        sidebarImageBatchButton.setEnabled(false);
+        content.addView(sidebarImageBatchButton, settingButtonParams());
+        sidebarVideoBatchButton = button(
+                "Videos detectados · " + currentPageDetectedVideos().size(),
+                this::showBulkVideoPicker);
+        content.addView(sidebarVideoBatchButton, settingButtonParams());
         addSidebarSection(content, "ADBLOCKER");
         rightAdBlockSummary = new TextView(this);
         rightAdBlockSummary.setTextColor(colorMuted);
@@ -744,6 +793,200 @@ public final class MainActivity extends Activity {
         scroll.addView(content);
         rightSidebar.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         refreshProtectionControls();
+    }
+
+    private void showBulkImagePicker() {
+        List<AdBlockEngine.PageImageCandidate> candidates =
+                new ArrayList<>(pageImageCandidates.subList(
+                        0, Math.min(MAX_BULK_ITEMS, pageImageCandidates.size())));
+        if (candidates.isEmpty() || !isCurrentPage(pageImagePageUrl)) {
+            Toast.makeText(this, "No hay imágenes de esta página listas para descargar.",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String[] labels = new String[candidates.size()];
+        boolean[] selected = new boolean[candidates.size()];
+        for (int index = 0; index < candidates.size(); index++) {
+            AdBlockEngine.PageImageCandidate image = candidates.get(index);
+            String label = image.label.isBlank() ? "Imagen " + (index + 1) : image.label;
+            String dimensions = image.width > 0 && image.height > 0
+                    ? " · " + image.width + "×" + image.height : "";
+            labels[index] = label + dimensions;
+            selected[index] = true;
+        }
+        dialogBuilder()
+                .setTitle("Imágenes · hasta " + MAX_BULK_ITEMS + " de mayor resolución")
+                .setMultiChoiceItems(labels, selected,
+                        (dialog, which, checked) -> selected[which] = checked)
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Descargar seleccionadas", (dialog, which) -> {
+                    List<AdBlockEngine.PageImageCandidate> chosen = new ArrayList<>();
+                    for (int index = 0; index < selected.length; index++) {
+                        if (selected[index]) {
+                            chosen.add(candidates.get(index));
+                        }
+                    }
+                    if (chosen.isEmpty()) {
+                        Toast.makeText(this, "Selecciona al menos una imagen.",
+                                Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    new AlertDialog.Builder(this)
+                            .setTitle("Confirmar descarga")
+                            .setMessage("Se descargarán " + chosen.size()
+                                    + " imágenes de la página actual. "
+                                    + "Solo se usan las direcciones HTTP(S) visibles en la página.")
+                            .setNegativeButton("Cancelar", null)
+                            .setPositiveButton("Descargar", (confirm, button) ->
+                                    startBulkImageDownloads(
+                                            pageImagePageUrl, pageImagePageTitle, chosen))
+                            .show();
+                })
+                .show();
+    }
+
+    private void startBulkImageDownloads(
+            String pageUrl,
+            String pageTitle,
+            List<AdBlockEngine.PageImageCandidate> images) {
+        int started = 0;
+        int skipped = 0;
+        int index = 0;
+        for (AdBlockEngine.PageImageCandidate image : images) {
+            if (hasCompletedDownload(image.url, "")) {
+                skipped++;
+                continue;
+            }
+            String filename = image.label.isBlank()
+                    ? (pageTitle.isBlank() ? "image" : pageTitle) + "-" + (++index)
+                    : image.label;
+            DownloadEntry entry = new DownloadEntry();
+            entry.name = filename;
+            entry.mimeType = "image/*";
+            entry.url = image.url;
+            entry.engine = "image-extractor";
+            entry.status = "En cola · imagen";
+            addDownloadEntry(entry);
+            String taskId = videoDownloadManager.downloadImageFromUrl(
+                    image.url, pageUrl, filename, getCustomDownloadFolder(),
+                    new VideoDownloadManager.Listener() {
+                        @Override
+                        public void onProgress(long bytes) {
+                            entry.bytes = bytes;
+                            entry.status = "Descargando imagen · " + formatBytes(bytes);
+                            persistDownloadIfDue(entry, false);
+                            refreshDownloadsDialog();
+                        }
+
+                        @Override
+                        public void onComplete(String location, String savedFilename, long bytes) {
+                            entry.processId = null;
+                            entry.location = location;
+                            entry.name = savedFilename;
+                            entry.mimeType = VideoDownloadManager.normalizedMediaMimeType(
+                                    savedFilename);
+                            entry.bytes = bytes;
+                            entry.status = "Completada · " + formatBytes(bytes);
+                            recordDownloadedLink(entry);
+                            runOnUiThread(() -> {
+                                saveDownloads();
+                                refreshDownloadsDialog();
+                            });
+                        }
+
+                        @Override
+                        public void onError(String message) {
+                            entry.processId = null;
+                            entry.status = message.contains("cancelada")
+                                    ? "Cancelada" : "Error: " + message;
+                            persistDownloadIfDue(entry, true);
+                            runOnUiThread(() -> {
+                                saveDownloads();
+                                refreshDownloadsDialog();
+                            });
+                        }
+                    });
+            if (isDownloadActive(entry)) {
+                entry.processId = taskId;
+            }
+            started++;
+        }
+        Toast.makeText(this,
+                "Imágenes en cola: " + started + (skipped > 0
+                        ? " · ya descargadas omitidas: " + skipped : ""),
+                Toast.LENGTH_LONG).show();
+    }
+
+    private void showBulkVideoPicker() {
+        if (bulkVideoBatchRunning) {
+            Toast.makeText(this, "Ya hay una cola de videos procesándose.",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        List<DetectedMedia> candidates = currentPageDetectedVideos();
+        if (candidates.isEmpty()) {
+            Toast.makeText(this, "Aún no se han detectado videos en esta página.",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (candidates.size() > MAX_BULK_ITEMS) {
+            candidates = new ArrayList<>(candidates.subList(0, MAX_BULK_ITEMS));
+        }
+        String[] labels = new String[candidates.size()];
+        boolean[] selected = new boolean[candidates.size()];
+        for (int index = 0; index < candidates.size(); index++) {
+            DetectedMedia media = candidates.get(index);
+            labels[index] = media.title + (media.videoHeight > 0
+                    ? " · " + media.videoHeight + "p" : "");
+            selected[index] = true;
+        }
+        List<DetectedMedia> selectable = candidates;
+        dialogBuilder()
+                .setTitle("Videos detectados · hasta " + MAX_BULK_ITEMS)
+                .setMessage("Se analizarán y descargarán en secuencia con yt-dlp. "
+                        + "No se accede a contenido DRM ni se evitan controles de acceso.")
+                .setMultiChoiceItems(labels, selected,
+                        (dialog, which, checked) -> selected[which] = checked)
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Descargar seleccionados", (dialog, which) -> {
+                    bulkVideoQueue.clear();
+                    for (int index = 0; index < selected.length; index++) {
+                        if (selected[index]) {
+                            bulkVideoQueue.addLast(selectable.get(index));
+                        }
+                    }
+                    if (bulkVideoQueue.isEmpty()) {
+                        Toast.makeText(this, "Selecciona al menos un video.",
+                                Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    bulkVideoBatchRunning = true;
+                    if (sidebarVideoBatchButton != null) {
+                        sidebarVideoBatchButton.setEnabled(false);
+                    }
+                    downloadNextBulkVideo();
+                })
+                .show();
+    }
+
+    private void downloadNextBulkVideo() {
+        DetectedMedia media = bulkVideoQueue.pollFirst();
+        if (media == null) {
+            bulkVideoBatchRunning = false;
+            if (sidebarVideoBatchButton != null) {
+                sidebarVideoBatchButton.setEnabled(true);
+            }
+            Toast.makeText(this, "La cola de videos terminó.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        startYtDlpDownload(
+                media.url,
+                titleForDownload(media.title, media.pageTitle),
+                "bestvideo+bestaudio/best",
+                false,
+                subtitlesByDefault,
+                media,
+                this::downloadNextBulkVideo);
     }
 
     private Switch sidebarSwitch(String label, boolean checked) {
@@ -1181,6 +1424,7 @@ public final class MainActivity extends Activity {
                     currentUrl = url;
                     runOnUiThread(() -> {
                         if (tab == activeTab) {
+                            selectPageImages(url);
                             addressField.setText(url);
                             updateTabCount();
                             updateFavoriteButton();
@@ -1253,9 +1497,11 @@ public final class MainActivity extends Activity {
         session.setActive(true);
         browserView.setSession(session);
         addressField.setText(currentUrl);
+        selectPageImages(currentUrl);
         updateFavoriteButton();
         updatePrivateButton();
         updateDetectedMediaButton();
+        updateBulkVideoButton();
         updateTabCount();
     }
 
@@ -1385,6 +1631,7 @@ public final class MainActivity extends Activity {
             detectedMedia.remove(oldest);
         }
         updateDetectedMediaButton();
+        updateBulkVideoButton();
         renderDetectedMediaItems();
     }
 
@@ -1420,6 +1667,93 @@ public final class MainActivity extends Activity {
         }
         mediaFab.setText("Medios · " + count);
         mediaFab.setVisibility(count > 0 ? View.VISIBLE : View.GONE);
+    }
+
+    private void updatePageImageCandidates(
+            String pageUrl,
+            String pageTitle,
+            List<AdBlockEngine.PageImageCandidate> images) {
+        if (privateMode || !isHttpUrl(pageUrl)) {
+            return;
+        }
+        List<AdBlockEngine.PageImageCandidate> safeImages = new ArrayList<>();
+        for (AdBlockEngine.PageImageCandidate image : images) {
+            if (safeImages.size() >= MAX_PAGE_IMAGE_CANDIDATES) {
+                break;
+            }
+            if (isHttpUrl(image.url)) {
+                safeImages.add(image);
+            }
+        }
+        String title = pageTitle == null ? "" : pageTitle;
+        String key = pageImageKey(pageUrl);
+        pageImagesByPage.remove(key);
+        pageImagesByPage.put(key, new PageImageSet(pageUrl, title, safeImages));
+        while (pageImagesByPage.size() > 20) {
+            pageImagesByPage.remove(pageImagesByPage.keySet().iterator().next());
+        }
+        if (!isCurrentPage(pageUrl)) {
+            return;
+        }
+        pageImagePageUrl = pageUrl;
+        pageImagePageTitle = title;
+        pageImageCandidates.clear();
+        pageImageCandidates.addAll(safeImages);
+        if (sidebarImageBatchButton != null) {
+            sidebarImageBatchButton.setText(
+                    "Imágenes de esta página · " + pageImageCandidates.size());
+            sidebarImageBatchButton.setEnabled(!pageImageCandidates.isEmpty());
+        }
+    }
+
+    private void clearPageImageCandidates() {
+        pageImageCandidates.clear();
+        pageImagePageUrl = "";
+        pageImagePageTitle = "";
+        if (sidebarImageBatchButton != null) {
+            sidebarImageBatchButton.setText("Imágenes de esta página · 0");
+            sidebarImageBatchButton.setEnabled(false);
+        }
+    }
+
+    private void selectPageImages(String pageUrl) {
+        clearPageImageCandidates();
+        if (!isHttpUrl(pageUrl)) {
+            return;
+        }
+        PageImageSet saved = pageImagesByPage.get(pageImageKey(pageUrl));
+        if (saved == null) {
+            return;
+        }
+        pageImagePageUrl = saved.pageUrl;
+        pageImagePageTitle = saved.title;
+        pageImageCandidates.addAll(saved.images);
+        if (sidebarImageBatchButton != null) {
+            sidebarImageBatchButton.setText(
+                    "Imágenes de esta página · " + pageImageCandidates.size());
+            sidebarImageBatchButton.setEnabled(!pageImageCandidates.isEmpty());
+        }
+    }
+
+    private String pageImageKey(String pageUrl) {
+        return Uri.parse(pageUrl).buildUpon().fragment(null).build().toString();
+    }
+
+    private void updateBulkVideoButton() {
+        if (sidebarVideoBatchButton != null) {
+            sidebarVideoBatchButton.setText(
+                    "Videos detectados · " + currentPageDetectedVideos().size());
+        }
+    }
+
+    private List<DetectedMedia> currentPageDetectedVideos() {
+        List<DetectedMedia> currentPage = new ArrayList<>();
+        for (DetectedMedia item : detectedMedia.values()) {
+            if (isCurrentPage(item.pageUrl)) {
+                currentPage.add(item);
+            }
+        }
+        return currentPage;
     }
 
     private void showDetectedMedia() {
@@ -2036,6 +2370,12 @@ public final class MainActivity extends Activity {
 
     private void startVideoDownload(
             InputStream input, String filename, String mimeType, String sourceUrl) {
+        if (hasCompletedDownload(sourceUrl, "")) {
+            closeQuietly(input);
+            Toast.makeText(this, "Este enlace ya se descargó; se omitió el duplicado.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
         DownloadEntry entry = new DownloadEntry();
         entry.name = filename;
         entry.mimeType = mimeType;
@@ -2062,6 +2402,7 @@ public final class MainActivity extends Activity {
                         entry.name = savedFilename;
                         entry.bytes = bytes;
                         entry.status = "Completada · " + formatBytes(bytes);
+                        recordDownloadedLink(entry);
                         runOnUiThread(() -> {
                             saveDownloads();
                             refreshDownloadsDialog();
@@ -2355,6 +2696,33 @@ public final class MainActivity extends Activity {
             boolean audioOnly,
             boolean includeSubtitles,
             DetectedMedia source) {
+        startYtDlpDownload(
+                url, title, formatSelector, audioOnly, includeSubtitles, source, () -> { });
+    }
+
+    private void startYtDlpDownload(
+            String url,
+            String title,
+            String formatSelector,
+            boolean audioOnly,
+            boolean includeSubtitles,
+            DetectedMedia source,
+            Runnable onFinished) {
+        if (hasCompletedDownload(url, formatSelector)) {
+            Toast.makeText(this, "Este enlace y formato ya se descargaron; se omitió.",
+                    Toast.LENGTH_LONG).show();
+            if (source != null) {
+                setDetectedMediaStatus(source, "Ya descargado", false);
+            }
+            mainHandler.post(onFinished);
+            return;
+        }
+        AtomicBoolean finished = new AtomicBoolean();
+        Runnable finish = () -> {
+            if (finished.compareAndSet(false, true)) {
+                runOnUiThread(onFinished);
+            }
+        };
         File temporaryDirectory = new File(
                 new File(getCacheDir(), "ytdlp"), UUID.randomUUID().toString());
         DownloadEntry entry = new DownloadEntry();
@@ -2414,6 +2782,7 @@ public final class MainActivity extends Activity {
                     cleanupYtDlpTemporaryFiles(temporaryDirectory);
                     saveDownloads();
                     refreshDownloadsDialog();
+                    finish.run();
                     return;
                 }
                 entry.name = file.getName();
@@ -2450,6 +2819,7 @@ public final class MainActivity extends Activity {
                                     entry.name = savedFilename;
                                     entry.bytes = bytes;
                                     entry.status = "Completada · " + formatBytes(bytes);
+                                    recordDownloadedLink(entry);
                                     if (source != null) {
                                         setDetectedMediaStatus(source, entry.status, false);
                                     }
@@ -2457,6 +2827,7 @@ public final class MainActivity extends Activity {
                                     runOnUiThread(() -> {
                                         saveDownloads();
                                         refreshDownloadsDialog();
+                                        finish.run();
                                     });
                                 }
 
@@ -2473,6 +2844,7 @@ public final class MainActivity extends Activity {
                                     runOnUiThread(() -> {
                                         saveDownloads();
                                         refreshDownloadsDialog();
+                                        finish.run();
                                     });
                                 }
                             });
@@ -2488,6 +2860,7 @@ public final class MainActivity extends Activity {
                     cleanupYtDlpTemporaryFiles(temporaryDirectory);
                     saveDownloads();
                     refreshDownloadsDialog();
+                    finish.run();
                 }
             }
 
@@ -2502,6 +2875,7 @@ public final class MainActivity extends Activity {
                 cleanupYtDlpTemporaryFiles(temporaryDirectory);
                 saveDownloads();
                 refreshDownloadsDialog();
+                finish.run();
             }
         });
     }
@@ -2542,6 +2916,91 @@ public final class MainActivity extends Activity {
             downloads.remove(removable);
         }
         saveDownloads();
+    }
+
+    private boolean hasCompletedDownload(String url, String formatSelector) {
+        try {
+            return downloadHistoryStore.contains(url, formatSelector);
+        } catch (RuntimeException exception) {
+            Toast.makeText(this,
+                    "No se pudo consultar el historial de enlaces; se canceló para evitar duplicados.",
+                    Toast.LENGTH_LONG).show();
+            return true;
+        }
+    }
+
+    private void recordDownloadedLink(DownloadEntry entry) {
+        if (entry.url == null || entry.url.isBlank()) {
+            return;
+        }
+        try {
+            downloadHistoryStore.record(
+                    entry.url,
+                    entry.formatSelector,
+                    entry.name,
+                    entry.location);
+        } catch (RuntimeException exception) {
+            runOnUiThread(() -> Toast.makeText(this,
+                    "La descarga terminó, pero no se pudo guardar su enlace en el historial.",
+                    Toast.LENGTH_LONG).show());
+        }
+    }
+
+    private void showDownloadedLinkHistory() {
+        List<DownloadHistoryStore.DownloadRecord> records;
+        try {
+            records = downloadHistoryStore.recent(200);
+        } catch (RuntimeException exception) {
+            Toast.makeText(this, "No se pudo leer el historial de enlaces descargados.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (records.isEmpty()) {
+            dialogBuilder().setTitle("Enlaces ya descargados")
+                    .setMessage("Aún no hay enlaces completados.")
+                    .setPositiveButton("Cerrar", null)
+                    .show();
+            return;
+        }
+        String[] labels = new String[records.size()];
+        for (int index = 0; index < records.size(); index++) {
+            DownloadHistoryStore.DownloadRecord record = records.get(index);
+            labels[index] = record.filename + "\n" + record.sourceUrl;
+        }
+        dialogBuilder()
+                .setTitle("Enlaces ya descargados")
+                .setItems(labels, (dialog, which) -> {
+                    DownloadHistoryStore.DownloadRecord record = records.get(which);
+                    DownloadEntry entry = new DownloadEntry();
+                    entry.name = record.filename;
+                    entry.location = record.location;
+                    entry.mimeType = VideoDownloadManager.normalizedMediaMimeType(
+                            record.filename);
+                    openDownloadedFile(entry, false);
+                })
+                .setNeutralButton("Borrar historial", (dialog, which) ->
+                        confirmClearDownloadedLinkHistory())
+                .setNegativeButton("Cerrar", null)
+                .show();
+    }
+
+    private void confirmClearDownloadedLinkHistory() {
+        dialogBuilder()
+                .setTitle("Borrar historial de enlaces")
+                .setMessage("Se borrará el registro usado para omitir duplicados. "
+                        + "Los archivos descargados no se eliminarán.")
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Borrar historial", (dialog, which) -> {
+                    try {
+                        downloadHistoryStore.clear();
+                        Toast.makeText(this, "Historial de enlaces borrado.",
+                                Toast.LENGTH_SHORT).show();
+                    } catch (RuntimeException exception) {
+                        Toast.makeText(this, "No se pudo borrar el historial de enlaces.",
+                                Toast.LENGTH_LONG).show();
+                    }
+                })
+                .show();
     }
 
     private boolean isDownloadActive(DownloadEntry entry) {
@@ -2680,10 +3139,25 @@ public final class MainActivity extends Activity {
             destination.setPadding(dp(16), dp(12), dp(16), dp(8));
             downloadsList.addView(destination);
             LinearLayout folderActions = new LinearLayout(this);
-            folderActions.setGravity(Gravity.END);
-            folderActions.addView(button("Elegir carpeta", this::chooseDownloadFolder));
+            folderActions.setOrientation(LinearLayout.VERTICAL);
+            Button galleryButton = button("Galería de videos", () -> {
+                Intent intent = new Intent(this, MediaGalleryActivity.class);
+                if (customFolder != null) {
+                    intent.putExtra(MediaGalleryActivity.EXTRA_FOLDER_URI,
+                            customFolder.toString());
+                }
+                startActivity(intent);
+            });
+            folderActions.addView(galleryButton, settingButtonParams());
+            folderActions.addView(button(
+                    "Enlaces ya descargados", this::showDownloadedLinkHistory),
+                    settingButtonParams());
+            folderActions.addView(button("Elegir carpeta", this::chooseDownloadFolder),
+                    settingButtonParams());
             if (customFolder != null) {
-                folderActions.addView(button("Abrir carpeta", () -> openDownloadFolder(customFolder)));
+                folderActions.addView(button(
+                        "Abrir carpeta", () -> openDownloadFolder(customFolder)),
+                        settingButtonParams());
             }
             downloadsList.addView(folderActions);
             if (customFolder == null) {
@@ -2910,6 +3384,12 @@ public final class MainActivity extends Activity {
     }
 
     private void openUriFile(Uri uri, boolean share, String mimeType) {
+        if (!share && mimeType != null && mimeType.startsWith("video/")) {
+            startActivity(new Intent(this, MediaPlayerActivity.class)
+                    .setDataAndType(uri, mimeType)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION));
+            return;
+        }
         Intent intent = new Intent(share ? Intent.ACTION_SEND : Intent.ACTION_VIEW);
         if (share) {
             intent.setType(mimeType == null ? "*/*" : mimeType);
@@ -2961,6 +3441,8 @@ public final class MainActivity extends Activity {
                 intent = new Intent(Intent.ACTION_SEND)
                         .setType(mimeType)
                         .putExtra(Intent.EXTRA_STREAM, uri);
+            } else if (mimeType.startsWith("video/")) {
+                intent = new Intent(this, MediaPlayerActivity.class).setDataAndType(uri, mimeType);
             } else {
                 intent = new Intent(Intent.ACTION_VIEW).setDataAndType(uri, mimeType);
             }
@@ -3180,10 +3662,19 @@ public final class MainActivity extends Activity {
         content.addView(button("Elegir carpeta de descargas", this::chooseDownloadFolder),
                 settingButtonParams());
 
-        TextView engineHeading = settingsSection("Motor yt-dlp");
+        TextView engineHeading = settingsSection("Módulos y actualizaciones");
         content.addView(engineHeading);
         content.addView(button("Comprobar y actualizar yt-dlp", this::updateYtDlp),
                 settingButtonParams());
+        TextView moduleUpdateInfo = new TextView(this);
+        moduleUpdateInfo.setText(
+                "yt-dlp y las listas de protección se actualizan por separado y con verificaciones. "
+                        + "El reproductor, el detector de imágenes y el código de los extractores "
+                        + "se actualizan mediante una APK firmada; la app no ejecuta código "
+                        + "descargado. La compatibilidad de códecs depende del dispositivo.");
+        moduleUpdateInfo.setTextSize(12);
+        moduleUpdateInfo.setTextColor(colorMuted);
+        content.addView(moduleUpdateInfo);
 
         ScrollView scroll = new ScrollView(this);
         scroll.addView(content);
