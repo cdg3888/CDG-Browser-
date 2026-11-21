@@ -66,7 +66,10 @@ internal object YtDlpFormats {
                     video to bestAudio
                 }
             }
-            .sortedWith(compareBy({ it.first.height }, { it.first.tbr }))
+            .sortedWith(
+                compareByDescending<Pair<ParsedFormat, ParsedFormat?>> { it.first.height }
+                    .thenByDescending { it.first.tbr }
+            )
             .forEach { (video, audio) ->
                 val selector = if (audio == null) {
                     video.formatId

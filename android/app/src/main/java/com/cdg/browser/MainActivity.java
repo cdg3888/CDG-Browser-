@@ -9,15 +9,20 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.ColorStateList;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.DocumentsContract;
+import android.provider.MediaStore;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
@@ -30,6 +35,8 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
@@ -66,6 +73,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import android.content.SharedPreferences;
 
 public final class MainActivity extends Activity {
     private static final String HOME_URL = "https://duckduckgo.com/";
@@ -73,6 +83,8 @@ public final class MainActivity extends Activity {
     private static final String HISTORY_KEY = "history";
     private static final String FAVORITES_KEY = "favorites";
     private static final String DOWNLOADS_KEY = "downloads";
+    private static final String DOWNLOAD_FOLDER_KEY = "download_folder_uri";
+    private static final int REQUEST_DOWNLOAD_FOLDER = 4701;
     private static final String THEME_KEY = "dark_theme";
     private static final int MAX_HISTORY_ITEMS = 50;
     private static GeckoRuntime runtime;
@@ -115,6 +127,7 @@ public final class MainActivity extends Activity {
     private Button siteExceptionButton;
     private Button updateFiltersButton;
     private Button mediaButton;
+    private Button mediaFab;
     private Switch protectionEnabledSwitch;
     private TextView protectionSummaryView;
     private boolean privateMode;
@@ -170,6 +183,9 @@ public final class MainActivity extends Activity {
         final String type;
         String downloadStatus = "Disponible";
         boolean downloadActive;
+        String title;
+        String thumbnailUrl;
+        String durationText;
 
         DetectedMedia(String key, String url, String pageUrl, String pageTitle, String type) {
             this.key = key;
@@ -235,6 +251,31 @@ public final class MainActivity extends Activity {
         });
         adBlockEngine.install();
         mainHandler.postDelayed(adBlockStartupFallback, 8000);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_DOWNLOAD_FOLDER
+                || resultCode != Activity.RESULT_OK
+                || data == null
+                || data.getData() == null) {
+            return;
+        }
+        Uri folderUri = data.getData();
+        try {
+            getContentResolver().takePersistableUriPermission(
+                    folderUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        } catch (SecurityException ignored) {
+        }
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .edit()
+                .putString(DOWNLOAD_FOLDER_KEY, folderUri.toString())
+                .apply();
+        Toast.makeText(this, "Carpeta de descargas actualizada", Toast.LENGTH_SHORT).show();
+        refreshDownloadsDialog();
     }
 
     private void createRuntime() {
@@ -318,9 +359,6 @@ public final class MainActivity extends Activity {
         tabCountView = tabsButton;
         actions.addView(button("Favoritos", this::showFavorites), actionButtonParams());
         actions.addView(button("Descargas", this::showDownloads), actionButtonParams());
-        actions.addView(button("yt-dlp", this::promptYtDlpDownload), actionButtonParams());
-        mediaButton = button("Medios · 0", this::showDetectedMedia);
-        actions.addView(mediaButton, actionButtonParams());
         actions.addView(button("Recargar", () -> {
             if (session != null) {
                 session.reload();
@@ -333,8 +371,38 @@ public final class MainActivity extends Activity {
         actionScroll.addView(actions);
         root.addView(actionScroll);
 
+        FrameLayout browserContainer = new FrameLayout(this);
         browserView = new GeckoView(this);
-        root.addView(browserView, new LinearLayout.LayoutParams(
+        browserContainer.addView(browserView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        mediaFab = new Button(this);
+        mediaFab.setText("Medios · 0");
+        mediaFab.setAllCaps(false);
+        mediaFab.setTextColor(Color.WHITE);
+        mediaFab.setTextSize(13);
+        mediaFab.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        mediaFab.setPadding(dp(18), 0, dp(18), 0);
+        mediaFab.setMinimumHeight(dp(48));
+        mediaFab.setBackground(rippleBackground(colorAccent, colorAccent, 24));
+        mediaFab.setOnClickListener(view -> {
+            if (detectedMedia.isEmpty()) {
+                dialogBuilder()
+                        .setTitle("Descargas multimedia")
+                        .setMessage("Todavía no hay videos o listas HLS detectados en esta página.")
+                        .setNegativeButton("Cerrar", null)
+                        .setPositiveButton("Añadir dirección", (dialog, which) -> promptYtDlpDownload())
+                        .show();
+            } else {
+                showDetectedMedia();
+            }
+        });
+        FrameLayout.LayoutParams fabParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, dp(48),
+                Gravity.BOTTOM | Gravity.END);
+        fabParams.setMargins(0, 0, dp(18), dp(18));
+        browserContainer.addView(mediaFab, fabParams);
+        root.addView(browserContainer, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1));
 
         statusView = new TextView(this);
@@ -708,7 +776,7 @@ public final class MainActivity extends Activity {
     }
 
     private void updateDetectedMediaButton() {
-        if (mediaButton == null) {
+        if (mediaFab == null) {
             return;
         }
         String currentHost = Uri.parse(currentUrl).getHost();
@@ -721,7 +789,8 @@ public final class MainActivity extends Activity {
                 }
             }
         }
-        mediaButton.setText("Medios · " + count);
+        mediaFab.setText("Medios · " + count);
+        mediaFab.setVisibility(count > 0 ? View.VISIBLE : View.GONE);
     }
 
     private void showDetectedMedia() {
@@ -849,15 +918,49 @@ public final class MainActivity extends Activity {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.VERTICAL);
             row.setPadding(dp(12), dp(8), dp(12), dp(8));
+            row.setBackground(rippleBackground(colorSurface, colorBorder, 14));
+            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            rowParams.setMargins(dp(4), dp(6), dp(4), dp(6));
+            row.setLayoutParams(rowParams);
+            LinearLayout heading = new LinearLayout(this);
+            heading.setOrientation(LinearLayout.HORIZONTAL);
+            heading.setGravity(Gravity.CENTER_VERTICAL);
+            if (item.thumbnailUrl != null) {
+                ImageView thumbnail = new ImageView(this);
+                thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                thumbnail.setBackground(rippleBackground(colorBackground, colorBorder, 12));
+                heading.addView(thumbnail, new LinearLayout.LayoutParams(dp(96), dp(54)));
+                loadThumbnail(thumbnail, item.thumbnailUrl);
+            }
             TextView label = new TextView(this);
             String source = item.pageTitle.isEmpty()
-                    ? item.pageUrl : item.pageTitle + "\n" + item.pageUrl;
-            label.setText(item.type + "\nDetectado en: " + source + "\n" + item.url);
+                    ? Uri.parse(item.pageUrl).getHost() : item.pageTitle;
+            String cardTitle = item.title == null || item.title.isEmpty()
+                    ? source : item.title;
+            String details = item.type + " detectado"
+                    + (item.durationText == null || item.durationText.isEmpty()
+                    ? "" : " · " + item.durationText);
+            label.setText(cardTitle + "\n" + details);
             label.setTextColor(colorText);
-            label.setTextSize(12);
-            label.setMaxLines(5);
+            label.setTextSize(14);
+            label.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            label.setMaxLines(2);
             label.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-            row.addView(label);
+            label.setPadding(item.thumbnailUrl == null ? 0 : dp(10), 0, 0, 0);
+            heading.addView(label, new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+            row.addView(heading);
+
+            TextView urlView = new TextView(this);
+            urlView.setText(item.url);
+            urlView.setTextColor(colorMuted);
+            urlView.setTextSize(11);
+            urlView.setMaxLines(1);
+            urlView.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+            urlView.setPadding(0, dp(6), 0, dp(2));
+            row.addView(urlView);
 
             TextView status = new TextView(this);
             status.setText(item.downloadStatus);
@@ -1165,6 +1268,7 @@ public final class MainActivity extends Activity {
         addDownloadEntry(entry);
         refreshDownloadsDialog();
         String taskId = videoDownloadManager.download(input, filename, mimeType,
+                getCustomDownloadFolder(),
                 new VideoDownloadManager.Listener() {
                     @Override
                     public void onProgress(long bytes) {
@@ -1318,6 +1422,11 @@ public final class MainActivity extends Activity {
                 if (source != null) {
                     setDetectedMediaStatus(
                             source, "Listo para descargar: " + info.getTitle(), false);
+                    source.title = info.getTitle();
+                    source.thumbnailUrl = info.getThumbnailUrl();
+                    source.durationText = info.getDurationSeconds() > 0
+                            ? formatDuration(info.getDurationSeconds()) : "";
+                    renderDetectedMediaItems();
                 }
                 String duration = info.getDurationSeconds() > 0
                         ? "\nDuración: " + formatDuration(info.getDurationSeconds()) : "";
@@ -1385,12 +1494,33 @@ public final class MainActivity extends Activity {
     private void selectYtDlpQuality(String url, YtDlpMediaInfo media, DetectedMedia source) {
         LinearLayout options = new LinearLayout(this);
         options.setOrientation(LinearLayout.VERTICAL);
+        if (media.getThumbnailUrl() != null) {
+            ImageView thumbnail = new ImageView(this);
+            thumbnail.setAdjustViewBounds(true);
+            thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            LinearLayout.LayoutParams thumbnailParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(180));
+            thumbnailParams.setMargins(0, 0, 0, dp(8));
+            options.addView(thumbnail, thumbnailParams);
+            loadThumbnail(thumbnail, media.getThumbnailUrl());
+        }
+        TextView title = new TextView(this);
+        title.setText(media.getTitle()
+                + (media.getDurationSeconds() > 0
+                ? "\nDuración: " + formatDuration(media.getDurationSeconds()) : ""));
+        title.setTextColor(colorText);
+        title.setTextSize(14);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setPadding(dp(4), dp(4), dp(4), dp(10));
+        options.addView(title);
         CheckBox includeSubtitles = new CheckBox(this);
         includeSubtitles.setText("Incluir subtítulos si están disponibles");
         options.addView(includeSubtitles);
+        ScrollView qualityScroll = new ScrollView(this);
+        qualityScroll.addView(options);
         AlertDialog qualityDialog = dialogBuilder()
                 .setTitle("Calidad y formato")
-                .setView(options)
+                .setView(qualityScroll)
                 .setNegativeButton("Cancelar", null)
                 .create();
         for (YtDlpFormatOption format : media.getFormats()) {
@@ -1493,6 +1623,7 @@ public final class MainActivity extends Activity {
                             new FileInputStream(file),
                             file.getName(),
                             entry.mimeType,
+                            getCustomDownloadFolder(),
                             new VideoDownloadManager.Listener() {
                                 @Override
                                 public void onProgress(long bytes) {
@@ -1629,6 +1760,55 @@ public final class MainActivity extends Activity {
         return String.format(Locale.ROOT, "%d:%02d", seconds / 60, seconds % 60);
     }
 
+    private Uri getCustomDownloadFolder() {
+        SharedPreferences preferences =
+                getSharedPreferences(PREFERENCES, MODE_PRIVATE);
+        String value = preferences.getString(DOWNLOAD_FOLDER_KEY, null);
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        try {
+            return Uri.parse(value);
+        } catch (Exception exception) {
+            return null;
+        }
+    }
+
+    private void chooseDownloadFolder() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        intent.putExtra(Intent.EXTRA_TITLE, "Elegir carpeta para CDG Browser");
+        startActivityForResult(intent, REQUEST_DOWNLOAD_FOLDER);
+    }
+
+    private void loadThumbnail(ImageView imageView, String thumbnailUrl) {
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(thumbnailUrl).openConnection();
+                connection.setConnectTimeout(8000);
+                connection.setReadTimeout(8000);
+                connection.setInstanceFollowRedirects(true);
+                if (connection.getResponseCode() >= 200 && connection.getResponseCode() < 300) {
+                    try (InputStream input = connection.getInputStream()) {
+                        Bitmap bitmap = BitmapFactory.decodeStream(input);
+                        if (bitmap != null) {
+                            mainHandler.post(() -> imageView.setImageBitmap(bitmap));
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        }).start();
+    }
+
     private void showDownloads() {
         downloadsList = new LinearLayout(this);
         downloadsList.setOrientation(LinearLayout.VERTICAL);
@@ -1657,14 +1837,29 @@ public final class MainActivity extends Activity {
             }
             downloadsList.removeAllViews();
             TextView destination = new TextView(this);
-            String folder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-                    ? "Descargas/CDG Browser"
-                    : "almacenamiento de la app / Descargas";
-            destination.setText("Destino: " + folder);
+            Uri customFolder = getCustomDownloadFolder();
+            String folder = customFolder == null
+                    ? (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                            ? "Descargas/CDG Browser"
+                            : "almacenamiento de la app / Descargas")
+                    : customFolder.getLastPathSegment();
+            destination.setText("Destino: " + (folder == null ? "carpeta elegida" : folder));
             destination.setTextSize(12);
             destination.setTextColor(colorMuted);
             destination.setPadding(dp(16), dp(12), dp(16), dp(8));
             downloadsList.addView(destination);
+            LinearLayout folderActions = new LinearLayout(this);
+            folderActions.setGravity(Gravity.END);
+            folderActions.addView(button("Elegir carpeta", this::chooseDownloadFolder));
+            if (customFolder != null) {
+                folderActions.addView(button("Abrir carpeta", () -> openDownloadFolder(customFolder)));
+            }
+            downloadsList.addView(folderActions);
+            if (customFolder == null) {
+                addFilesFromMediaStore();
+            } else {
+                addFilesFromCustomFolder(customFolder);
+            }
             Button clearHistory = button("Limpiar historial terminado", () -> dialogBuilder()
                     .setTitle("Limpiar historial")
                     .setMessage("Se quitarán del historial las descargas terminadas o fallidas, pero no se borrarán los archivos.")
@@ -1688,14 +1883,24 @@ public final class MainActivity extends Activity {
             for (DownloadEntry entry : downloads) {
                 LinearLayout row = new LinearLayout(this);
                 row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setOrientation(LinearLayout.VERTICAL);
+                row.setBackground(rippleBackground(colorSurface, colorBorder, 14));
+                LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+                rowParams.setMargins(dp(12), dp(5), dp(12), dp(5));
+                row.setLayoutParams(rowParams);
                 TextView item = new TextView(this);
-                item.setText(entry.name + "\n" + entry.status);
+                String size = entry.bytes > 0 ? " · " + formatBytes(entry.bytes) : "";
+                item.setText(entry.name + size + "\n" + entry.status);
                 item.setTextSize(13);
                 item.setTextColor(colorText);
                 item.setPadding(dp(16), dp(12), dp(8), dp(12));
-                row.addView(item, new LinearLayout.LayoutParams(0, -2, 1));
+                row.addView(item);
+                LinearLayout actions = new LinearLayout(this);
+                actions.setGravity(Gravity.END);
                 if (isDownloadActive(entry) && entry.processId != null) {
-                    row.addView(button("Cancelar", () -> {
+                    actions.addView(button("Cancelar", () -> {
                         boolean cancelled;
                         if ("direct".equals(entry.engine) || entry.copying) {
                             cancelled = videoDownloadManager.cancel(entry.processId);
@@ -1713,22 +1918,190 @@ public final class MainActivity extends Activity {
                 } else if (!isDownloadActive(entry)
                         && !entry.status.startsWith("Completada")
                         && entry.url != null && !entry.url.isEmpty()) {
-                    row.addView(button("Reintentar", () -> inspectWithYtDlp(entry.url)));
+                    actions.addView(button("Reintentar", () -> inspectWithYtDlp(entry.url)));
                 }
                 if (entry.status.startsWith("Completada") && entry.location != null) {
-                    row.addView(button("Abrir", () -> openDownloadedFile(entry, false)));
-                    row.addView(button("Compartir", () -> openDownloadedFile(entry, true)));
+                    actions.addView(button("Abrir", () -> openDownloadedFile(entry, false)));
+                    actions.addView(button("Compartir", () -> openDownloadedFile(entry, true)));
                 }
                 if (!isDownloadActive(entry)) {
-                    row.addView(button("Quitar", () -> {
+                    actions.addView(button("Quitar", () -> {
                         downloads.remove(entry);
                         saveDownloads();
                         refreshDownloadsDialog();
                     }));
                 }
+                row.addView(actions);
                 downloadsList.addView(row);
             }
         });
+    }
+
+    private void addFilesFromMediaStore() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return;
+        }
+        TextView title = new TextView(this);
+        title.setText("Archivos descargados");
+        title.setTextSize(14);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setTextColor(colorText);
+        title.setPadding(dp(16), dp(12), dp(16), dp(4));
+        downloadsList.addView(title);
+        int shown = 0;
+        try (Cursor cursor = getContentResolver().query(
+                MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+                new String[]{
+                        MediaStore.Downloads._ID,
+                        MediaStore.Downloads.DISPLAY_NAME,
+                        MediaStore.Downloads.MIME_TYPE,
+                        MediaStore.Downloads.SIZE,
+                        MediaStore.Downloads.RELATIVE_PATH
+                },
+                MediaStore.Downloads.RELATIVE_PATH + " LIKE ?",
+                new String[]{"%CDG Browser%"},
+                MediaStore.Downloads.DATE_ADDED + " DESC")) {
+            if (cursor != null) {
+                int idColumn = cursor.getColumnIndex(MediaStore.Downloads._ID);
+                int nameColumn = cursor.getColumnIndex(MediaStore.Downloads.DISPLAY_NAME);
+                int mimeColumn = cursor.getColumnIndex(MediaStore.Downloads.MIME_TYPE);
+                int sizeColumn = cursor.getColumnIndex(MediaStore.Downloads.SIZE);
+                while (cursor.moveToNext()) {
+                    long id = idColumn >= 0 ? cursor.getLong(idColumn) : 0;
+                    if (id == 0) {
+                        continue;
+                    }
+                    String name = nameColumn >= 0 ? cursor.getString(nameColumn) : "Archivo";
+                    String mime = mimeColumn >= 0 ? cursor.getString(mimeColumn) : "*/*";
+                    long size = sizeColumn >= 0 ? cursor.getLong(sizeColumn) : 0;
+                    Uri fileUri = Uri.withAppendedPath(
+                            MediaStore.Downloads.getContentUri(
+                                    MediaStore.VOLUME_EXTERNAL_PRIMARY),
+                            String.valueOf(id));
+                    LinearLayout row = new LinearLayout(this);
+                    row.setGravity(Gravity.CENTER_VERTICAL);
+                    TextView item = new TextView(this);
+                    item.setText(name + "\n" + formatBytes(size));
+                    item.setTextSize(13);
+                    item.setTextColor(colorText);
+                    item.setPadding(dp(16), dp(10), dp(8), dp(10));
+                    row.addView(item, new LinearLayout.LayoutParams(0, -2, 1));
+                    row.addView(button("Abrir", () -> openUriFile(fileUri, false, mime)));
+                    row.addView(button("Compartir", () -> openUriFile(fileUri, true, mime)));
+                    downloadsList.addView(row);
+                    shown++;
+                }
+            }
+        } catch (Exception exception) {
+            TextView error = new TextView(this);
+            error.setText("No se pudo leer Descargas/CDG Browser.");
+            error.setTextColor(colorMuted);
+            error.setPadding(dp(16), dp(8), dp(16), dp(8));
+            downloadsList.addView(error);
+        }
+        if (shown == 0) {
+            TextView empty = new TextView(this);
+            empty.setText("No hay archivos todavía en Descargas/CDG Browser.");
+            empty.setTextColor(colorMuted);
+            empty.setPadding(dp(16), dp(8), dp(16), dp(12));
+            downloadsList.addView(empty);
+        }
+    }
+
+    private void addFilesFromCustomFolder(Uri folderUri) {
+        if (folderUri == null) {
+            return;
+        }
+        TextView title = new TextView(this);
+        title.setText("Archivos en la carpeta");
+        title.setTextSize(14);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setTextColor(colorText);
+        title.setPadding(dp(16), dp(12), dp(16), dp(4));
+        downloadsList.addView(title);
+        int shown = 0;
+        Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                folderUri, DocumentsContract.getTreeDocumentId(folderUri));
+        try (Cursor cursor = getContentResolver().query(
+                childrenUri,
+                new String[]{
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE,
+                        DocumentsContract.Document.COLUMN_SIZE
+                },
+                null, null, null)) {
+            if (cursor != null) {
+                int idColumn = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID);
+                int nameColumn = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME);
+                int mimeColumn = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE);
+                int sizeColumn = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE);
+                while (cursor.moveToNext()) {
+                    String mime = mimeColumn >= 0 ? cursor.getString(mimeColumn) : null;
+                    if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
+                        continue;
+                    }
+                    String name = nameColumn >= 0 ? cursor.getString(nameColumn) : "Archivo";
+                    long size = sizeColumn >= 0 ? cursor.getLong(sizeColumn) : 0;
+                    String documentId = idColumn >= 0 ? cursor.getString(idColumn) : null;
+                    if (documentId == null) {
+                        continue;
+                    }
+                    Uri fileUri = DocumentsContract.buildDocumentUriUsingTree(folderUri, documentId);
+                    LinearLayout row = new LinearLayout(this);
+                    row.setGravity(Gravity.CENTER_VERTICAL);
+                    TextView item = new TextView(this);
+                    item.setText(name + "\n" + formatBytes(size));
+                    item.setTextSize(13);
+                    item.setTextColor(colorText);
+                    item.setPadding(dp(16), dp(10), dp(8), dp(10));
+                    row.addView(item, new LinearLayout.LayoutParams(0, -2, 1));
+                    row.addView(button("Abrir", () -> openUriFile(fileUri, false, mime)));
+                    row.addView(button("Compartir", () -> openUriFile(fileUri, true, mime)));
+                    downloadsList.addView(row);
+                    shown++;
+                }
+            }
+        } catch (Exception exception) {
+            TextView error = new TextView(this);
+            error.setText("No se pudo leer la carpeta elegida.");
+            error.setTextColor(colorMuted);
+            error.setPadding(dp(16), dp(8), dp(16), dp(8));
+            downloadsList.addView(error);
+        }
+        if (shown == 0) {
+            TextView empty = new TextView(this);
+            empty.setText("No hay archivos descargados en esta carpeta.");
+            empty.setTextColor(colorMuted);
+            empty.setPadding(dp(16), dp(8), dp(16), dp(12));
+            downloadsList.addView(empty);
+        }
+    }
+
+    private void openUriFile(Uri uri, boolean share, String mimeType) {
+        Intent intent = new Intent(share ? Intent.ACTION_SEND : Intent.ACTION_VIEW);
+        if (share) {
+            intent.setType(mimeType == null ? "*/*" : mimeType);
+            intent.putExtra(Intent.EXTRA_STREAM, uri);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(intent, "Compartir descarga"));
+        } else {
+            intent.setDataAndType(uri, mimeType == null ? "*/*" : mimeType);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(intent, "Abrir descarga"));
+        }
+    }
+
+    private void openDownloadFolder(Uri folderUri) {
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        intent.setDataAndType(folderUri, "vnd.android.document/directory");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivity(Intent.createChooser(intent, "Abrir carpeta"));
+        } catch (ActivityNotFoundException exception) {
+            Toast.makeText(this, "No hay una aplicación compatible para abrir carpetas.",
+                    Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void openDownloadedFile(DownloadEntry entry, boolean share) {

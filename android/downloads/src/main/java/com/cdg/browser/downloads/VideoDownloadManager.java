@@ -7,6 +7,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.provider.DocumentsContract;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -46,6 +47,7 @@ public final class VideoDownloadManager implements AutoCloseable {
         volatile OutputStream output;
         volatile Uri mediaUri;
         volatile File localFile;
+        volatile boolean customFolder;
         volatile boolean cancelled;
 
         DownloadTask(InputStream input, Listener listener) {
@@ -186,6 +188,15 @@ public final class VideoDownloadManager implements AutoCloseable {
             String filename,
             String mimeType,
             Listener listener) {
+        return download(input, filename, mimeType, null, listener);
+    }
+
+    public String download(
+            InputStream input,
+            String filename,
+            String mimeType,
+            Uri customFolderUri,
+            Listener listener) {
         Objects.requireNonNull(listener, "listener");
         if (input == null || !(supportsDirectVideo(mimeType, filename)
                 || isAudioMime(mimeType) || isAudioFilename(filename))) {
@@ -200,7 +211,8 @@ public final class VideoDownloadManager implements AutoCloseable {
         DownloadTask task = new DownloadTask(input, listener);
         tasks.put(task.id, task);
         try {
-            task.future = executor.submit(() -> writeDownload(task, safeFilename, safeMimeType));
+            task.future = executor.submit(() ->
+                    writeDownload(task, safeFilename, safeMimeType, customFolderUri));
             return task.id;
         } catch (RejectedExecutionException exception) {
             tasks.remove(task.id);
@@ -233,7 +245,8 @@ public final class VideoDownloadManager implements AutoCloseable {
     private void writeDownload(
             DownloadTask task,
             String filename,
-            String mimeType) {
+            String mimeType,
+            Uri customFolderUri) {
         long bytes = 0;
         try (InputStream source = task.input) {
             if (task.cancelled) {
@@ -241,7 +254,23 @@ public final class VideoDownloadManager implements AutoCloseable {
             }
             OutputStream output;
             String savedFilename = filename;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (customFolderUri != null) {
+                task.customFolder = true;
+                String safe = uniqueDocumentFilename(customFolderUri, filename);
+                task.mediaUri = DocumentsContract.createDocument(
+                        appContext.getContentResolver(),
+                        customFolderUri,
+                        mimeType,
+                        safe);
+                if (task.mediaUri == null) {
+                    throw new IOException("No se pudo crear el archivo en la carpeta elegida.");
+                }
+                savedFilename = safe;
+                output = appContext.getContentResolver().openOutputStream(task.mediaUri);
+                if (output == null) {
+                    throw new IOException("No se pudo escribir en la carpeta elegida.");
+                }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 String relativePath = Environment.DIRECTORY_DOWNLOADS + "/CDG Browser/";
                 savedFilename = uniqueMediaStoreFilename(filename, relativePath);
                 ContentValues values = new ContentValues();
@@ -290,7 +319,7 @@ public final class VideoDownloadManager implements AutoCloseable {
             }
 
             String location;
-            if (task.mediaUri != null) {
+            if (task.mediaUri != null && !task.customFolder) {
                 ContentValues values = new ContentValues();
                 values.put(MediaStore.Downloads.IS_PENDING, 0);
                 appContext.getContentResolver().update(task.mediaUri, values, null, null);
@@ -331,6 +360,45 @@ public final class VideoDownloadManager implements AutoCloseable {
             error = "No se pudo eliminar la descarga incompleta.";
         }
         return error;
+    }
+
+    private String uniqueDocumentFilename(Uri folderUri, String filename) {
+        String candidate = sanitizeFilename(filename);
+        if (!documentNameExists(folderUri, candidate)) {
+            return candidate;
+        }
+        int dot = candidate.lastIndexOf('.');
+        String stem = dot > 0 ? candidate.substring(0, dot) : candidate;
+        String extension = dot > 0 ? candidate.substring(dot) : "";
+        for (int suffix = 2; suffix < 10000; suffix++) {
+            String next = stem + " (" + suffix + ")" + extension;
+            if (!documentNameExists(folderUri, next)) {
+                return next;
+            }
+        }
+        return candidate;
+    }
+
+    private boolean documentNameExists(Uri folderUri, String name) {
+        try (Cursor cursor = appContext.getContentResolver().query(
+                DocumentsContract.buildChildDocumentsUriUsingTree(
+                        folderUri, DocumentsContract.getTreeDocumentId(folderUri)),
+                new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME},
+                null, null, null)) {
+            if (cursor == null) {
+                return false;
+            }
+            int nameColumn = cursor.getColumnIndex(
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME);
+            while (cursor.moveToNext()) {
+                if (nameColumn >= 0
+                        && name.equalsIgnoreCase(cursor.getString(nameColumn))) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
     }
 
     private static String getHeader(Map<String, String> headers, String name) {
