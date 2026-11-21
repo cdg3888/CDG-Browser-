@@ -171,12 +171,46 @@ test("enriches an existing detection with page title and poster metadata", () =>
     url: pageUrl,
     tab: { url: pageUrl, incognito: false }
   });
-
   const detected = messages.filter((message) => message.type === "media-detected");
   assert.equal(detected.length, 2);
   assert.equal(detected[1].pageTitle, "Example film");
   assert.equal(detected[1].thumbnailUrl, "https://images.example/poster.jpg");
   assert.equal(detected[1].videoHeight, 1080);
+});
+
+test("applies player metadata to HLS links detected before or after the player", () => {
+  const { listeners, messages } = createBackground();
+  const url = "https://cdn.example/live.m3u8?token=abc";
+  const pageUrl = "https://site.example/watch";
+  listeners.beforeRequest({ url, documentUrl: pageUrl, type: "xmlhttprequest" });
+  listeners.runtimeMessage({
+    type: "page-media-metadata",
+    pageTitle: "Live event",
+    thumbnailUrl: "https://images.example/live.jpg",
+    videoWidth: 1920,
+    videoHeight: 1080,
+    durationSeconds: 3600
+  }, {
+    url: pageUrl,
+    tab: { url: pageUrl, incognito: false }
+  });
+
+  const enriched = messages.filter((message) => message.type === "media-detected").at(-1);
+  assert.equal(enriched.url, url);
+  assert.equal(enriched.mediaType, "HLS");
+  assert.equal(enriched.pageTitle, "Live event");
+  assert.equal(enriched.thumbnailUrl, "https://images.example/live.jpg");
+  assert.equal(enriched.videoHeight, 1080);
+  assert.equal(enriched.durationSeconds, 3600);
+
+  listeners.beforeRequest({
+    url: "https://cdn.example/another.m3u8",
+    documentUrl: pageUrl,
+    type: "xmlhttprequest"
+  });
+  const later = messages.filter((message) => message.type === "media-detected").at(-1);
+  assert.equal(later.pageTitle, "Live event");
+  assert.equal(later.thumbnailUrl, "https://images.example/live.jpg");
 });
 
 test("forwards top-page scroll events and honors the media detection setting", () => {

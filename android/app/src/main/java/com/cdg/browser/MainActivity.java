@@ -92,6 +92,7 @@ public final class MainActivity extends Activity {
     private static final String HISTORY_KEY = "history";
     private static final String FAVORITES_KEY = "favorites";
     private static final String DOWNLOADS_KEY = "downloads";
+    private static final String PENDING_MEDIA_KEY = "pending_media";
     private static final String DOWNLOAD_FOLDER_KEY = "download_folder_uri";
     private static final String ADDRESS_AUTO_HIDE_KEY = "address_auto_hide";
     private static final String MINIMUM_MEDIA_HEIGHT_KEY = "minimum_media_height";
@@ -125,6 +126,7 @@ public final class MainActivity extends Activity {
     private final List<BrowserTab> tabs = new ArrayList<>();
     private final List<DownloadEntry> downloads = new ArrayList<>();
     private final LinkedHashMap<String, DetectedMedia> detectedMedia = new LinkedHashMap<>();
+    private final LinkedHashMap<String, DetectedMedia> pendingMedia = new LinkedHashMap<>();
     private final LinkedHashMap<String, PageImageSet> pageImagesByPage = new LinkedHashMap<>();
     private final LinkedHashMap<String, TextView> detectedMediaStatusViews = new LinkedHashMap<>();
     private final LinkedHashMap<String, Button> detectedMediaDownloadButtons = new LinkedHashMap<>();
@@ -258,8 +260,8 @@ public final class MainActivity extends Activity {
         String durationText;
         int videoWidth;
         int videoHeight;
-        boolean showLowerQualities;
         boolean includeSubtitles;
+        boolean analysisInProgress;
         String analysisProcessId;
         final List<YtDlpFormatOption> formats = new ArrayList<>();
 
@@ -759,7 +761,7 @@ public final class MainActivity extends Activity {
         sidebarImageBatchButton.setEnabled(false);
         content.addView(sidebarImageBatchButton, settingButtonParams());
         sidebarVideoBatchButton = button(
-                "Descargar varios videos · " + allDetectedVideos().size(),
+                "Descargas para después · " + pendingMedia.size(),
                 this::showBulkVideoPicker);
         content.addView(sidebarVideoBatchButton, settingButtonParams());
         sidebarMediaLibraryButton = button(
@@ -939,9 +941,14 @@ public final class MainActivity extends Activity {
                     Toast.LENGTH_SHORT).show();
             return;
         }
-        List<DetectedMedia> candidates = allDetectedVideos();
+        if (privateMode) {
+            Toast.makeText(this, "La lista para después no está disponible en modo privado.",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        List<DetectedMedia> candidates = new ArrayList<>(pendingMedia.values());
         if (candidates.isEmpty()) {
-            Toast.makeText(this, "Aún no se han acumulado videos detectados.",
+            Toast.makeText(this, "Añade videos desde la biblioteca para guardarlos aquí.",
                     Toast.LENGTH_SHORT).show();
             return;
         }
@@ -953,7 +960,7 @@ public final class MainActivity extends Activity {
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(8), dp(4), dp(8), dp(4));
         TextView instructions = new TextView(this);
-        instructions.setText("Selecciona videos acumulados de las páginas visitadas. "
+        instructions.setText("Enlaces guardados para descargar más tarde. "
                 + "yt-dlp analizará metadatos antes de descargar.");
         instructions.setTextColor(colorMuted);
         instructions.setPadding(dp(8), dp(4), dp(8), dp(8));
@@ -961,9 +968,12 @@ public final class MainActivity extends Activity {
         LinearLayout selectionActions = new LinearLayout(this);
         Button selectAll = button("Todos", () -> { });
         Button selectNone = button("Ninguno", () -> { });
+        Button removeSelected = button("Quitar", () -> { });
         selectionActions.addView(selectAll, new LinearLayout.LayoutParams(0,
                 dp(44), 1));
         selectionActions.addView(selectNone, new LinearLayout.LayoutParams(0,
+                dp(44), 1));
+        selectionActions.addView(removeSelected, new LinearLayout.LayoutParams(0,
                 dp(44), 1));
         content.addView(selectionActions);
         ScrollView scroll = new ScrollView(this);
@@ -987,7 +997,7 @@ public final class MainActivity extends Activity {
         }
         content.addView(scroll, new LinearLayout.LayoutParams(-1, dp(320)));
         AlertDialog picker = dialogBuilder()
-                .setTitle("Videos acumulados · hasta " + MAX_BULK_ITEMS)
+                .setTitle("Descargas para después · " + candidates.size())
                 .setView(content)
                 .setNegativeButton("Cancelar", null)
                 .setPositiveButton("Analizar selección", null)
@@ -1001,6 +1011,16 @@ public final class MainActivity extends Activity {
             for (CheckBox checkBox : checkBoxes) {
                 checkBox.setChecked(false);
             }
+        });
+        removeSelected.setOnClickListener(view -> {
+            for (int index = 0; index < checkBoxes.size(); index++) {
+                if (checkBoxes.get(index).isChecked()) {
+                    pendingMedia.remove(selectedCandidates.get(index).key);
+                }
+            }
+            savePendingMedia();
+            updateBulkVideoButton();
+            picker.dismiss();
         });
         picker.setOnShowListener(dialog -> picker.getButton(AlertDialog.BUTTON_POSITIVE)
                 .setOnClickListener(view -> {
@@ -1028,7 +1048,7 @@ public final class MainActivity extends Activity {
             return;
         }
         DetectedMedia media = bulkVideoAnalysisQueue.get(bulkVideoAnalysisIndex++);
-        setDetectedMediaStatus(media, "Analizando metadatos…", true);
+        setDetectedMediaStatus(media, "Analizando metadatos…", false);
         inspectWithYtDlp(media.url, media, () -> {
             if (isFinishing()) {
                 return;
@@ -1808,7 +1828,8 @@ public final class MainActivity extends Activity {
             int videoWidth,
             int videoHeight,
             int durationSeconds) {
-        if (url == null || url.length() > 8192 || pageUrl == null || pageUrl.length() > 8192
+        if (privateMode || url == null || url.length() > 8192
+                || pageUrl == null || pageUrl.length() > 8192
                 || !isHttpUrl(url) || !isHttpUrl(pageUrl)
                 || !("HLS".equals(mediaType) || "DASH".equals(mediaType)
                 || "Video".equals(mediaType))) {
@@ -1847,6 +1868,9 @@ public final class MainActivity extends Activity {
             if (durationSeconds > 0) {
                 item.durationText = formatDuration(durationSeconds);
             }
+        }
+        if (pendingMedia.containsKey(item.key)) {
+            savePendingMedia();
         }
         if (detectedMedia.size() > 100) {
             String oldest = detectedMedia.keySet().iterator().next();
@@ -2013,7 +2037,7 @@ public final class MainActivity extends Activity {
     private void updateBulkVideoButton() {
         if (sidebarVideoBatchButton != null) {
             sidebarVideoBatchButton.setText(
-                    "Descargar varios videos · " + allDetectedVideos().size());
+                    "Descargas para después · " + pendingMedia.size());
         }
         if (sidebarMediaLibraryButton != null) {
             sidebarMediaLibraryButton.setText(
@@ -2030,6 +2054,36 @@ public final class MainActivity extends Activity {
             }
         }
         return videos;
+    }
+
+    private void togglePendingMedia(DetectedMedia item) {
+        if (privateMode) {
+            Toast.makeText(this, "No se guardan enlaces desde el modo privado.",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (pendingMedia.containsKey(item.key)) {
+            pendingMedia.remove(item.key);
+            Toast.makeText(this, "Quitado de la lista para después.", Toast.LENGTH_SHORT).show();
+        } else {
+            if (pendingMedia.size() >= MAX_BULK_ITEMS) {
+                Toast.makeText(this, "La lista admite hasta "
+                        + MAX_BULK_ITEMS + " enlaces.", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            pendingMedia.put(item.key, item);
+            Toast.makeText(this, "Guardado para descargar después.", Toast.LENGTH_SHORT).show();
+        }
+        savePendingMedia();
+        updateBulkVideoButton();
+        renderDetectedMediaItems();
+    }
+
+    private void removePendingMedia(DetectedMedia item) {
+        if (item != null && pendingMedia.remove(item.key) != null) {
+            savePendingMedia();
+            updateBulkVideoButton();
+        }
     }
 
     private void showDetectedMedia() {
@@ -2182,10 +2236,11 @@ public final class MainActivity extends Activity {
                     || isGenericMediaTitle(item.title)
                     ? source : item.title;
             String resolution = item.videoWidth > 0 && item.videoHeight > 0
-                    ? item.videoWidth + "×" + item.videoHeight + " · " : "";
-            String details = resolution + item.type + " detectado"
-                    + (item.durationText == null || item.durationText.isEmpty()
-                    ? "" : " · " + item.durationText);
+                    ? item.videoWidth + "×" + item.videoHeight
+                    : "Calidad no detectada";
+            String duration = item.durationText == null || item.durationText.isEmpty()
+                    ? "Duración no detectada" : item.durationText;
+            String details = resolution + " · " + item.type + " · " + duration;
             label.setText(cardTitle + "\n" + details);
             label.setTextColor(colorText);
             label.setTextSize(14);
@@ -2223,23 +2278,42 @@ public final class MainActivity extends Activity {
                 Toast.makeText(this, "Enlace copiado", Toast.LENGTH_SHORT).show();
             }));
             Button downloadButton = button(
-                    item.formats.isEmpty() ? "Analizar calidades" : "Actualizar calidades", () -> {
-                setDetectedMediaStatus(item, "Analizando con yt-dlp…", true);
-                inspectWithYtDlp(item.url, item);
-            });
-            downloadButton.setEnabled(!item.downloadActive);
+                    item.analysisInProgress ? "Analizando…"
+                            : item.formats.isEmpty()
+                            ? "Descargar · analizar calidades"
+                            : "Descargar · elegir calidad",
+                    () -> {
+                        if (!item.formats.isEmpty()) {
+                            selectYtDlpQuality(item.url, new YtDlpMediaInfo(
+                                    titleForDownload(item.title, item.pageTitle),
+                                    0,
+                                    item.thumbnailUrl,
+                                    new ArrayList<>(item.formats)), item);
+                        } else {
+                            setDetectedMediaStatus(item, "Analizando con yt-dlp…", false);
+                            inspectWithYtDlp(item.url, item);
+                        }
+                    });
+            downloadButton.setEnabled(!item.downloadActive && !item.analysisInProgress);
             detectedMediaDownloadButtons.put(item.key, downloadButton);
             if (item.analysisProcessId != null) {
                 actions.addView(button("Cancelar análisis", () -> {
                     ytDlpEngine.cancelInfo(item.analysisProcessId);
                     item.analysisProcessId = null;
+                    item.analysisInProgress = false;
                     setDetectedMediaStatus(item, "Análisis cancelado.", false);
                     renderDetectedMediaItems();
                 }));
             }
             actions.addView(downloadButton);
             row.addView(actions);
-            renderInlineQualityOptions(item, row);
+            Button saveForLaterButton = button(
+                    pendingMedia.containsKey(item.key)
+                            ? "Quitar de descargas para después"
+                            : "Guardar para después",
+                    () -> togglePendingMedia(item));
+            row.addView(saveForLaterButton, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
             detectedMediaList.addView(row);
             shown++;
         }
@@ -2253,85 +2327,12 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void renderInlineQualityOptions(DetectedMedia item, LinearLayout row) {
-        if (item.formats.isEmpty()) {
-            return;
-        }
-        TextView heading = new TextView(this);
-        heading.setText(
-                "Calidades disponibles · " + minimumMediaHeight + "p o superior");
-        heading.setTextColor(colorText);
-        heading.setTextSize(13);
-        heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        heading.setPadding(0, dp(10), 0, dp(4));
-        row.addView(heading);
-
-        CheckBox includeSubtitles = new CheckBox(this);
-        includeSubtitles.setText("Incluir subtítulos si están disponibles");
-        includeSubtitles.setChecked(item.includeSubtitles);
-        includeSubtitles.setOnCheckedChangeListener(
-                (button, checked) -> item.includeSubtitles = checked);
-        row.addView(includeSubtitles);
-
-        List<YtDlpFormatOption> highQuality = new ArrayList<>();
-        List<YtDlpFormatOption> lowerQuality = new ArrayList<>();
-        for (YtDlpFormatOption format : item.formats) {
-            if (!format.getAudioOnly() && format.getHeight() >= minimumMediaHeight) {
-                highQuality.add(format);
-            } else {
-                lowerQuality.add(format);
-            }
-        }
-        if (highQuality.isEmpty() && !item.showLowerQualities) {
-            TextView unavailable = new TextView(this);
-            unavailable.setText("No se encontró 1080p o superior. Revisa las opciones avanzadas.");
-            unavailable.setTextColor(colorMuted);
-            unavailable.setTextSize(12);
-            row.addView(unavailable);
-        }
-        for (YtDlpFormatOption format : highQuality) {
-            addInlineFormatButton(item, row, format);
-        }
-        if (!lowerQuality.isEmpty()) {
-            Button advanced = button(
-                    item.showLowerQualities
-                            ? "Ocultar calidades inferiores"
-                            : "Opciones avanzadas · Mostrar calidades inferiores",
-                    () -> {
-                        item.showLowerQualities = !item.showLowerQualities;
-                        renderDetectedMediaItems();
-                    });
-            row.addView(advanced, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-            if (item.showLowerQualities) {
-                for (YtDlpFormatOption format : lowerQuality) {
-                    addInlineFormatButton(item, row, format);
-                }
-            }
-        }
-    }
-
-    private void addInlineFormatButton(
-            DetectedMedia item,
-            LinearLayout container,
-            YtDlpFormatOption format) {
-        Button formatButton = button(
-                format.getTitle() + "\n" + format.getDetails(),
-                () -> startYtDlpDownload(
-                        item.url,
-                        titleForDownload(item.title, item.pageTitle),
-                        format.getSelector(),
-                        format.getAudioOnly(),
-                        !format.getAudioOnly() && item.includeSubtitles,
-                        item));
-        formatButton.setMaxLines(3);
-        container.addView(formatButton, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-    }
-
     private boolean isGenericMediaTitle(String title) {
         return title == null || title.trim().isEmpty()
-                || title.trim().matches("(?i)(playlist|video|media|stream|index)(\\.[a-z0-9]{2,5})?");
+                || title.trim().matches(
+                "(?i)(playlist|video|media|stream|index)(\\.[a-z0-9]{2,5})?")
+                || title.trim().matches(
+                "(?i).+\\.(m3u8?|mpd|mp4|m4v|mov|webm|mkv|avi|mpeg|mpg|3gp)");
     }
 
     private String titleForDownload(String mediaTitle, String pageTitle) {
@@ -2350,7 +2351,7 @@ public final class MainActivity extends Activity {
             }
             Button downloadButton = detectedMediaDownloadButtons.get(item.key);
             if (downloadButton != null) {
-                downloadButton.setEnabled(!active);
+                downloadButton.setEnabled(!active && !item.analysisInProgress);
             }
         });
     }
@@ -2778,6 +2779,13 @@ public final class MainActivity extends Activity {
 
     private void inspectWithYtDlp(
             String url, DetectedMedia source, Runnable onFinished) {
+        if (source != null && source.analysisInProgress) {
+            return;
+        }
+        if (source != null) {
+            source.analysisInProgress = true;
+            renderDetectedMediaItems();
+        }
         boolean[] cancelled = {false};
         String[] analysisProcessId = {null};
         AtomicBoolean analysisFinished = new AtomicBoolean();
@@ -2831,6 +2839,7 @@ public final class MainActivity extends Activity {
                 }
                 if (source != null) {
                     source.analysisProcessId = null;
+                    source.analysisInProgress = false;
                     source.title = titleForDownload(info.getTitle(), source.pageTitle);
                     source.thumbnailUrl = info.getThumbnailUrl() != null
                             ? info.getThumbnailUrl() : source.thumbnailUrl;
@@ -2870,6 +2879,7 @@ public final class MainActivity extends Activity {
                 }
                 if (!cancelled[0] && source != null) {
                     source.analysisProcessId = null;
+                    source.analysisInProgress = false;
                     setDetectedMediaStatus(source, "No se encontró un formato descargable.", false);
                     renderDetectedMediaItems();
                 } else if (!cancelled[0] && !isFinishing()) {
@@ -2885,7 +2895,11 @@ public final class MainActivity extends Activity {
                 }
                 if (source != null) {
                     source.analysisProcessId = null;
-                    setDetectedMediaStatus(source, "Error de análisis: " + message, false);
+                    source.analysisInProgress = false;
+                    setDetectedMediaStatus(source,
+                            "Análisis cancelado.".equals(message)
+                                    ? message : "Error de análisis: " + message,
+                            false);
                     renderDetectedMediaItems();
                 }
                 if (!cancelled[0] && source == null && !isFinishing()) {
@@ -2913,6 +2927,8 @@ public final class MainActivity extends Activity {
                     loading.dismiss();
                 }
                 if (source != null) {
+                    source.analysisProcessId = null;
+                    source.analysisInProgress = false;
                     setDetectedMediaStatus(source, "Error de inicio: " + message, false);
                     renderDetectedMediaItems();
                 }
@@ -2938,9 +2954,11 @@ public final class MainActivity extends Activity {
             loadThumbnail(thumbnail, media.getThumbnailUrl());
         }
         TextView title = new TextView(this);
+        String duration = media.getDurationSeconds() > 0
+                ? formatDuration(media.getDurationSeconds())
+                : source == null ? "" : source.durationText;
         title.setText(media.getTitle()
-                + (media.getDurationSeconds() > 0
-                ? "\nDuración: " + formatDuration(media.getDurationSeconds()) : ""));
+                + (duration == null || duration.isEmpty() ? "" : "\nDuración: " + duration));
         title.setTextColor(colorText);
         title.setTextSize(14);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
@@ -2948,16 +2966,39 @@ public final class MainActivity extends Activity {
         options.addView(title);
         CheckBox includeSubtitles = new CheckBox(this);
         includeSubtitles.setText("Incluir subtítulos si están disponibles");
-        includeSubtitles.setChecked(subtitlesByDefault);
+        includeSubtitles.setChecked(source == null
+                ? subtitlesByDefault : source.includeSubtitles);
+        includeSubtitles.setOnCheckedChangeListener((button, checked) -> {
+            if (source != null) {
+                source.includeSubtitles = checked;
+            }
+        });
         options.addView(includeSubtitles);
+        TextView qualityHint = new TextView(this);
+        qualityHint.setText("Calidades disponibles · se prioriza "
+                + minimumMediaHeight + "p o superior");
+        qualityHint.setTextColor(colorMuted);
+        qualityHint.setTextSize(12);
+        qualityHint.setPadding(dp(4), dp(8), dp(4), dp(4));
+        options.addView(qualityHint);
         ScrollView qualityScroll = new ScrollView(this);
-        qualityScroll.addView(options);
         AlertDialog qualityDialog = dialogBuilder()
                 .setTitle("Calidad y formato")
                 .setView(qualityScroll)
                 .setNegativeButton("Cancelar", null)
                 .create();
+        List<YtDlpFormatOption> preferredFormats = new ArrayList<>();
+        List<YtDlpFormatOption> otherFormats = new ArrayList<>();
         for (YtDlpFormatOption format : media.getFormats()) {
+            if (!format.getAudioOnly() && format.getHeight() >= minimumMediaHeight) {
+                preferredFormats.add(format);
+            } else {
+                otherFormats.add(format);
+            }
+        }
+        List<YtDlpFormatOption> orderedFormats = new ArrayList<>(preferredFormats);
+        orderedFormats.addAll(otherFormats);
+        for (YtDlpFormatOption format : orderedFormats) {
             Button formatButton = button(
                     format.getTitle() + "\n" + format.getDetails(), () -> {
                 qualityDialog.dismiss();
@@ -2978,6 +3019,7 @@ public final class MainActivity extends Activity {
         });
         options.addView(audioButton, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        qualityScroll.addView(options);
         qualityDialog.show();
     }
 
@@ -3005,6 +3047,7 @@ public final class MainActivity extends Activity {
                     Toast.LENGTH_LONG).show();
             if (source != null) {
                 setDetectedMediaStatus(source, "Ya descargado", false);
+                removePendingMedia(source);
             }
             mainHandler.post(onFinished);
             return;
@@ -3117,6 +3160,7 @@ public final class MainActivity extends Activity {
                                     }
                                     cleanupYtDlpTemporaryFiles(temporaryDirectory);
                                     runOnUiThread(() -> {
+                                        removePendingMedia(source);
                                         saveDownloads();
                                         refreshDownloadsDialog();
                                         finish.run();
@@ -4219,6 +4263,7 @@ public final class MainActivity extends Activity {
         subtitlesByDefault = preferences.getBoolean(DEFAULT_SUBTITLES_KEY, false);
         loadLines(preferences.getString(HISTORY_KEY, ""), history);
         loadLines(preferences.getString(FAVORITES_KEY, ""), favorites);
+        loadPendingMedia(preferences.getString(PENDING_MEDIA_KEY, "[]"));
         String savedDownloads = preferences.getString(DOWNLOADS_KEY, "[]");
         try {
             JSONArray items = new JSONArray(savedDownloads);
@@ -4265,6 +4310,85 @@ public final class MainActivity extends Activity {
     private void saveFavorites() {
         getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
                 .putString(FAVORITES_KEY, String.join("\n", favorites))
+                .apply();
+    }
+
+    private void loadPendingMedia(String savedPendingMedia) {
+        try {
+            JSONArray items = new JSONArray(savedPendingMedia);
+            for (int index = 0; index < items.length()
+                    && pendingMedia.size() < MAX_BULK_ITEMS; index++) {
+                JSONObject saved = items.optJSONObject(index);
+                if (saved == null) {
+                    continue;
+                }
+                String url = saved.optString("url", "");
+                String pageUrl = saved.optString("pageUrl", "");
+                String type = saved.optString("type", "");
+                if (url.length() > 8192 || !isHttpUrl(url) || !isHttpUrl(pageUrl)
+                        || !("Video".equals(type) || "HLS".equals(type)
+                        || "DASH".equals(type))) {
+                    continue;
+                }
+                String key = normalizeMediaUrl(url);
+                if (pendingMedia.containsKey(key)) {
+                    continue;
+                }
+                String thumbnailUrl = saved.optString("thumbnailUrl", "");
+                if (!isHttpUrl(thumbnailUrl) || thumbnailUrl.length() > 2048) {
+                    thumbnailUrl = null;
+                }
+                String pageTitle = saved.optString("pageTitle", "");
+                if (pageTitle.length() > 200) {
+                    pageTitle = pageTitle.substring(0, 200);
+                }
+                DetectedMedia item = new DetectedMedia(
+                        key,
+                        url,
+                        pageUrl,
+                        pageTitle,
+                        type,
+                        thumbnailUrl,
+                        Math.max(0, Math.min(saved.optInt("videoWidth", 0), 16384)),
+                        Math.max(0, Math.min(saved.optInt("videoHeight", 0), 16384)),
+                        0);
+                item.title = saved.optString("title", "");
+                String durationText = saved.optString("durationText", "");
+                if (durationText.matches("\\d{1,5}:\\d{2}")) {
+                    item.durationText = durationText;
+                }
+                item.includeSubtitles = subtitlesByDefault;
+                pendingMedia.put(key, item);
+                detectedMedia.putIfAbsent(key, item);
+            }
+        } catch (org.json.JSONException exception) {
+            Toast.makeText(this, "No se pudo leer la lista de descargas para después",
+                    Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void savePendingMedia() {
+        JSONArray items = new JSONArray();
+        for (DetectedMedia media : pendingMedia.values()) {
+            JSONObject item = new JSONObject();
+            try {
+                item.put("url", media.url);
+                item.put("pageUrl", media.pageUrl);
+                item.put("pageTitle", media.pageTitle);
+                item.put("title", media.title);
+                item.put("type", media.type);
+                item.put("thumbnailUrl", media.thumbnailUrl);
+                item.put("videoWidth", media.videoWidth);
+                item.put("videoHeight", media.videoHeight);
+                item.put("durationText", media.durationText);
+                items.put(item);
+            } catch (org.json.JSONException exception) {
+                Toast.makeText(this, "No se pudo guardar un enlace para después",
+                        Toast.LENGTH_SHORT).show();
+            }
+        }
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+                .putString(PENDING_MEDIA_KEY, items.toString())
                 .apply();
     }
 

@@ -135,6 +135,7 @@ class YtDlpEngine(context: Context) {
             .addOption("--skip-download")
             .addOption("--no-playlist")
             .addOption("--no-warnings")
+            .addOption("--no-check-formats")
             .addOption("--socket-timeout", NETWORK_TIMEOUT_SECONDS)
         if (isHttpUrl(referer)) {
             request.addOption("--referer", referer!!)

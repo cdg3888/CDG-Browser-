@@ -24,6 +24,7 @@
   let nativePort = null;
   let reconnectDelayMs = 500;
   const reportedMedia = new Map();
+  const pageMediaMetadata = new Map();
 
   function send(message) {
     if (nativePort) {
@@ -92,19 +93,21 @@
     if (mediaType && pageUrl) {
       const key = `${pageUrl}\n${details.url}`;
       const previous = reportedMedia.get(key) || {};
+      const savedPageMetadata = pageMediaMetadata.get(pageUrl);
+      const effectiveMetadata = pageMetadata || savedPageMetadata;
       const metadata = {
-        pageTitle: typeof pageMetadata?.pageTitle === "string"
-          ? pageMetadata.pageTitle.trim().slice(0, 200) : "",
-        thumbnailUrl: typeof pageMetadata?.thumbnailUrl === "string"
-          && pageMetadata.thumbnailUrl.length <= 2048
-          && /^https?:\/\//i.test(pageMetadata.thumbnailUrl)
-          ? pageMetadata.thumbnailUrl : "",
-        videoWidth: Number.isInteger(pageMetadata?.videoWidth)
-          ? Math.min(Math.max(pageMetadata.videoWidth, 0), 16384) : 0,
-        videoHeight: Number.isInteger(pageMetadata?.videoHeight)
-          ? Math.min(Math.max(pageMetadata.videoHeight, 0), 16384) : 0,
-        durationSeconds: Number.isInteger(pageMetadata?.durationSeconds)
-          ? Math.min(Math.max(pageMetadata.durationSeconds, 0), 604800) : 0
+        pageTitle: typeof effectiveMetadata?.pageTitle === "string"
+          ? effectiveMetadata.pageTitle.trim().slice(0, 200) : "",
+        thumbnailUrl: typeof effectiveMetadata?.thumbnailUrl === "string"
+          && effectiveMetadata.thumbnailUrl.length <= 2048
+          && /^https?:\/\//i.test(effectiveMetadata.thumbnailUrl)
+          ? effectiveMetadata.thumbnailUrl : "",
+        videoWidth: Number.isInteger(effectiveMetadata?.videoWidth)
+          ? Math.min(Math.max(effectiveMetadata.videoWidth, 0), 16384) : 0,
+        videoHeight: Number.isInteger(effectiveMetadata?.videoHeight)
+          ? Math.min(Math.max(effectiveMetadata.videoHeight, 0), 16384) : 0,
+        durationSeconds: Number.isInteger(effectiveMetadata?.durationSeconds)
+          ? Math.min(Math.max(effectiveMetadata.durationSeconds, 0), 604800) : 0
       };
       const combined = {
         pageTitle: metadata.pageTitle || previous.pageTitle || "",
@@ -116,7 +119,7 @@
       const changed = !reportedMedia.has(key)
         || Object.keys(combined).some((field) => combined[field] !== previous[field]);
       if (changed) {
-        reportedMedia.set(key, combined);
+        reportedMedia.set(key, { ...combined, mediaType });
         if (reportedMedia.size > 200) {
           reportedMedia.delete(reportedMedia.keys().next().value);
         }
@@ -133,9 +136,66 @@
 
   browser.runtime.onMessage.addListener((message, sender) => {
     if (!message || message.type !== "page-media-detected"
+        && message.type !== "page-media-metadata"
         && message.type !== "page-scroll"
         && message.type !== "page-images-detected"
         || sender.tab?.incognito === true) {
+      return;
+    }
+    if (message.type === "page-media-metadata") {
+      const pageUrl = sender.url || sender.tab?.url;
+      if (!pageUrl || !getHost(pageUrl)) {
+        return;
+      }
+      const metadata = {
+        pageTitle: typeof message.pageTitle === "string"
+          ? message.pageTitle.trim().slice(0, 200) : "",
+        thumbnailUrl: typeof message.thumbnailUrl === "string"
+          && message.thumbnailUrl.length <= 2048
+          && /^https?:\/\//i.test(message.thumbnailUrl) ? message.thumbnailUrl : "",
+        videoWidth: Number.isInteger(message.videoWidth)
+          ? Math.min(Math.max(message.videoWidth, 0), 16384) : 0,
+        videoHeight: Number.isInteger(message.videoHeight)
+          ? Math.min(Math.max(message.videoHeight, 0), 16384) : 0,
+        durationSeconds: Number.isInteger(message.durationSeconds)
+          ? Math.min(Math.max(message.durationSeconds, 0), 604800) : 0
+      };
+      pageMediaMetadata.delete(pageUrl);
+      pageMediaMetadata.set(pageUrl, metadata);
+      if (pageMediaMetadata.size > 100) {
+        pageMediaMetadata.delete(pageMediaMetadata.keys().next().value);
+      }
+      for (const [key, previous] of reportedMedia) {
+        if (!key.startsWith(`${pageUrl}\n`)) {
+          continue;
+        }
+        const combined = {
+          pageTitle: metadata.pageTitle || previous.pageTitle || "",
+          thumbnailUrl: metadata.thumbnailUrl || previous.thumbnailUrl || "",
+          videoWidth: metadata.videoWidth || previous.videoWidth || 0,
+          videoHeight: metadata.videoHeight || previous.videoHeight || 0,
+          durationSeconds: metadata.durationSeconds || previous.durationSeconds || 0
+        };
+        if (Object.keys(combined).some((field) => combined[field] !== previous[field])) {
+          reportedMedia.set(key, { ...combined, mediaType: previous.mediaType });
+          const url = key.slice(pageUrl.length + 1);
+          send({
+            type: "media-detected",
+            mediaType: previous.mediaType || CDGMediaSniffer.classify(url) || "Video",
+            url,
+            pageUrl,
+            ...combined
+          });
+        }
+      }
+      if (typeof message.url === "string" && CDGMediaSniffer.classify(message.url)) {
+        reportMedia({
+          url: message.url,
+          documentUrl: pageUrl,
+          type: "media",
+          incognito: false
+        }, null, true, metadata);
+      }
       return;
     }
     if (message.type === "page-images-detected") {

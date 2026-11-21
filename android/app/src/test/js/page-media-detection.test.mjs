@@ -62,11 +62,12 @@ test("reports a playing HTML5 video source once and ignores paused videos", () =
   listeners.loadedmetadata({ target: video });
 
   assert.equal(messages.length, 1);
-  assert.equal(messages[0].type, "page-media-detected");
+  assert.equal(messages[0].type, "page-media-metadata");
   assert.equal(messages[0].url, "https://cdn.example/movie.mp4");
   assert.equal(messages[0].pageTitle, "Example video");
   assert.equal(messages[0].thumbnailUrl, "https://site.example/poster.jpg");
   assert.equal(messages[0].videoWidth, 1280);
+  assert.equal(messages[0].durationSeconds, 0);
 });
 
 test("detects a paused video once its metadata has loaded", () => {
@@ -82,6 +83,7 @@ test("detects a paused video once its metadata has loaded", () => {
   });
 
   assert.equal(messages.length, 1);
+  assert.equal(messages[0].type, "page-media-metadata");
   assert.equal(messages[0].url, "https://cdn.example/movie.mp4");
 });
 

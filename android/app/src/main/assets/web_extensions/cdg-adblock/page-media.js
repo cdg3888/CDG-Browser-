@@ -7,8 +7,18 @@
       return;
     }
     const url = video.currentSrc || video.src;
-    if (!url || !CDGMediaSniffer.classify(url)) {
+    if (!url) {
       return;
+    }
+    if (!CDGMediaSniffer.classify(url) && !url.startsWith("blob:")) {
+      try {
+        const path = new URL(url, document.baseURI).pathname;
+        if (/\.[a-z\d]{2,5}$/i.test(path.split("/").pop() || "")) {
+          return;
+        }
+      } catch {
+        return;
+      }
     }
     const rawThumbnail = video.poster
       || document.querySelector('meta[property="og:image"]')?.content
@@ -31,12 +41,17 @@
       videoHeight: video.videoHeight,
       durationSeconds: Number.isFinite(video.duration) ? Math.floor(video.duration) : 0
     };
-    const reportKey = `${url}\n${metadata.thumbnailUrl}\n${metadata.videoWidth}x${metadata.videoHeight}`;
+    const reportKey = `${url}\n${metadata.pageTitle}\n${metadata.thumbnailUrl}\n`
+      + `${metadata.videoWidth}x${metadata.videoHeight}\n${metadata.durationSeconds}`;
     if (reported.get(video) === reportKey) {
       return;
     }
     reported.set(video, reportKey);
-    browser.runtime.sendMessage({ type: "page-media-detected", url, ...metadata });
+    browser.runtime.sendMessage({
+      type: "page-media-metadata",
+      url: url && CDGMediaSniffer.classify(url) ? url : "",
+      ...metadata
+    });
   }
 
   document.addEventListener("playing", (event) => inspect(event.target), true);
