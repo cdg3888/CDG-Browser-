@@ -3,6 +3,8 @@ package com.cdg.browser;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.annotation.SuppressLint;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
@@ -48,6 +50,7 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
@@ -74,6 +77,7 @@ public final class MainActivity extends Activity {
     private final List<String> favorites = new ArrayList<>();
     private final List<BrowserTab> tabs = new ArrayList<>();
     private final List<DownloadEntry> downloads = new ArrayList<>();
+    private final LinkedHashMap<String, DetectedMedia> detectedMedia = new LinkedHashMap<>();
 
     private GeckoView browserView;
     private GeckoSession session;
@@ -92,6 +96,7 @@ public final class MainActivity extends Activity {
     private Button favoriteButton;
     private Button siteExceptionButton;
     private Button updateFiltersButton;
+    private Button mediaButton;
     private Switch protectionEnabledSwitch;
     private TextView protectionSummaryView;
     private boolean privateMode;
@@ -124,6 +129,18 @@ public final class MainActivity extends Activity {
         String engine;
         String processId;
         long bytes;
+    }
+
+    private static final class DetectedMedia {
+        final String url;
+        final String pageUrl;
+        final String type;
+
+        DetectedMedia(String url, String pageUrl, String type) {
+            this.url = url;
+            this.pageUrl = pageUrl;
+            this.type = type;
+        }
     }
 
     @Override
@@ -168,6 +185,11 @@ public final class MainActivity extends Activity {
                     }
                     refreshProtectionControls();
                 });
+            }
+
+            @Override
+            public void onMediaDetected(String url, String pageUrl, String mediaType) {
+                runOnUiThread(() -> addDetectedMedia(url, pageUrl, mediaType));
             }
         });
         adBlockEngine.install();
@@ -256,6 +278,8 @@ public final class MainActivity extends Activity {
         actions.addView(button("Favoritos", this::showFavorites), actionButtonParams());
         actions.addView(button("Descargas", this::showDownloads), actionButtonParams());
         actions.addView(button("yt-dlp", this::promptYtDlpDownload), actionButtonParams());
+        mediaButton = button("Medios · 0", this::showDetectedMedia);
+        actions.addView(mediaButton, actionButtonParams());
         actions.addView(button("Recargar", () -> {
             if (session != null) {
                 session.reload();
@@ -341,6 +365,7 @@ public final class MainActivity extends Activity {
             session.setActive(true);
             browserView.setSession(session);
             updateTabCount();
+            updateDetectedMediaButton();
             updateFavoriteButton();
             updatePrivateButton();
         }
@@ -431,6 +456,7 @@ public final class MainActivity extends Activity {
                             addressField.setText(url);
                             updateTabCount();
                             updateFavoriteButton();
+                            updateDetectedMediaButton();
                         }
                     });
                 }
@@ -498,6 +524,7 @@ public final class MainActivity extends Activity {
         addressField.setText(currentUrl);
         updateFavoriteButton();
         updatePrivateButton();
+        updateDetectedMediaButton();
         updateTabCount();
     }
 
@@ -567,6 +594,102 @@ public final class MainActivity extends Activity {
         if (tabCountView != null) {
             tabCountView.setText("Pestañas · " + tabs.size());
         }
+    }
+
+    private void addDetectedMedia(String url, String pageUrl, String mediaType) {
+        if (url == null || url.length() > 8192 || pageUrl == null || pageUrl.length() > 8192
+                || !isHttpUrl(url) || !isHttpUrl(pageUrl)
+                || !("HLS".equals(mediaType) || "DASH".equals(mediaType)
+                || "Video".equals(mediaType))) {
+            return;
+        }
+        detectedMedia.remove(url);
+        detectedMedia.put(url, new DetectedMedia(url, pageUrl, mediaType));
+        if (detectedMedia.size() > 100) {
+            String oldest = detectedMedia.keySet().iterator().next();
+            detectedMedia.remove(oldest);
+        }
+        updateDetectedMediaButton();
+    }
+
+    private void updateDetectedMediaButton() {
+        if (mediaButton == null) {
+            return;
+        }
+        String currentHost = Uri.parse(currentUrl).getHost();
+        int count = 0;
+        if (currentHost != null) {
+            for (DetectedMedia item : detectedMedia.values()) {
+                String pageHost = Uri.parse(item.pageUrl).getHost();
+                if (pageHost != null && currentHost.equalsIgnoreCase(pageHost)) {
+                    count++;
+                }
+            }
+        }
+        mediaButton.setText("Medios · " + count);
+    }
+
+    private void showDetectedMedia() {
+        String currentHost = Uri.parse(currentUrl).getHost();
+        List<DetectedMedia> items = new ArrayList<>();
+        if (currentHost != null) {
+            for (DetectedMedia item : detectedMedia.values()) {
+                String pageHost = Uri.parse(item.pageUrl).getHost();
+                if (pageHost != null && currentHost.equalsIgnoreCase(pageHost)) {
+                    items.add(item);
+                }
+            }
+        }
+        if (items.isEmpty()) {
+            dialogBuilder()
+                    .setTitle("Medios detectados")
+                    .setMessage("Aún no se detectaron enlaces HLS, DASH o de video en este sitio.")
+                    .setPositiveButton("Cerrar", null)
+                    .show();
+            return;
+        }
+
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        for (DetectedMedia item : items) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.VERTICAL);
+            row.setPadding(dp(12), dp(8), dp(12), dp(8));
+            TextView label = new TextView(this);
+            label.setText(item.type + " · " + item.url);
+            label.setTextColor(colorText);
+            label.setTextSize(12);
+            label.setMaxLines(3);
+            label.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+            row.addView(label);
+
+            LinearLayout actions = new LinearLayout(this);
+            actions.setGravity(Gravity.END);
+            actions.addView(button("Copiar enlace", () -> {
+                ClipboardManager clipboard = (ClipboardManager) getSystemService(
+                        Context.CLIPBOARD_SERVICE);
+                clipboard.setPrimaryClip(ClipData.newPlainText("Enlace de medio", item.url));
+                Toast.makeText(this, "Enlace copiado", Toast.LENGTH_SHORT).show();
+            }));
+            actions.addView(button("Descargar", () -> inspectWithYtDlp(item.url)));
+            row.addView(actions);
+            list.addView(row);
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(list);
+        dialogBuilder()
+                .setTitle("Medios detectados · " + items.size())
+                .setView(scroll)
+                .setNegativeButton("Cerrar", null)
+                .show();
+    }
+
+    private boolean isHttpUrl(String value) {
+        Uri uri = Uri.parse(value);
+        String scheme = uri.getScheme();
+        return uri.getHost() != null
+                && ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));
     }
 
     private void toggleAddressBar() {

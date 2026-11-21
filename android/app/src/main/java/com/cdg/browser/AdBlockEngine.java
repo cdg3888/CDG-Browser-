@@ -22,6 +22,8 @@ final class AdBlockEngine {
         void onStateChanged();
 
         void onError(String message);
+
+        void onMediaDetected(String url, String pageUrl, String mediaType);
     }
 
     private static final String EXTENSION_URI =
@@ -192,6 +194,16 @@ final class AdBlockEngine {
                 updateInProgress = false;
                 reportError(data.optString("message", "No se pudo completar la operación."));
                 break;
+            case "media-detected":
+                String url = data.optString("url", "");
+                String pageUrl = data.optString("pageUrl", "");
+                String mediaType = data.optString("mediaType", "");
+                if (listener != null && isHttpUrl(url) && isHttpUrl(pageUrl)
+                        && ("HLS".equals(mediaType) || "DASH".equals(mediaType)
+                        || "Video".equals(mediaType))) {
+                    listener.onMediaDetected(url, pageUrl, mediaType);
+                }
+                break;
             default:
                 reportError("El motor de filtros envió un evento desconocido.");
         }
@@ -353,5 +365,16 @@ final class AdBlockEngine {
             }
         }
         return domain;
+    }
+
+    private static boolean isHttpUrl(String value) {
+        try {
+            java.net.URI uri = new java.net.URI(value);
+            String scheme = uri.getScheme();
+            return uri.getHost() != null
+                    && ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));
+        } catch (java.net.URISyntaxException exception) {
+            return false;
+        }
     }
 }

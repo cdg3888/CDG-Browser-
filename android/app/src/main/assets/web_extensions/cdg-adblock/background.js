@@ -20,6 +20,7 @@
   let updateInProgress = false;
   let nativePort = null;
   let reconnectDelayMs = 500;
+  const reportedMedia = new Set();
 
   function send(message) {
     if (nativePort) {
@@ -60,24 +61,48 @@
     return false;
   }
 
-  function handleRequest(details) {
-    if (!enabled || details.type === "main_frame") {
-      return {};
+  function reportMedia(details) {
+    const pageUrl = details.documentUrl || details.originUrl || details.initiator;
+    const mediaType = details.incognito === true
+      ? null
+      : CDGMediaSniffer.classify(details.url);
+    if (mediaType && pageUrl) {
+      const key = `${pageUrl}\n${details.url}`;
+      if (!reportedMedia.has(key)) {
+        reportedMedia.add(key);
+        if (reportedMedia.size > 200) {
+          reportedMedia.delete(reportedMedia.values().next().value);
+        }
+        send({
+          type: "media-detected",
+          mediaType,
+          url: details.url,
+          pageUrl
+        });
+      }
     }
+  }
+
+  function handleRequest(details) {
     const requestHost = getHost(details.url);
     const pageHost = getHost(details.documentUrl || details.originUrl || details.initiator);
-    if (!requestHost || !pageHost
-        || isAllowedSite(pageHost)
-        || CDGFilterRules.isFirstParty(pageHost, requestHost)
-        || !CDGFilterRules.matches(requestHost, blockedDomains)) {
-      return {};
+    const shouldBlock = enabled
+      && details.type !== "main_frame"
+      && requestHost
+      && pageHost
+      && !isAllowedSite(pageHost)
+      && !CDGFilterRules.isFirstParty(pageHost, requestHost)
+      && CDGFilterRules.matches(requestHost, blockedDomains);
+    if (shouldBlock) {
+      blockedCount += 1;
+      if (blockedCount === 1 || blockedCount % 25 === 0) {
+        publishState();
+      }
+      return { cancel: true };
     }
 
-    blockedCount += 1;
-    if (blockedCount === 1 || blockedCount % 25 === 0) {
-      publishState();
-    }
-    return { cancel: true };
+    reportMedia(details);
+    return {};
   }
 
   browser.webRequest.onBeforeRequest.addListener(

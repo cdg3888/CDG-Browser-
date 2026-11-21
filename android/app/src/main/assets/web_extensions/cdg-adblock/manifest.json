@@ -12,6 +12,7 @@
     "scripts": [
       "filter-rules.js",
       "filters.js",
+      "media-sniffer.js",
       "background.js"
     ],
     "persistent": true
